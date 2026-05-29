@@ -1,15 +1,23 @@
 //! `speak` — an on-device text-to-speech CLI for AI agents.
 //!
 //! Thin wrapper over the `speak-core` SDK: parse arguments, read text from an
-//! argument or stdin, synthesize, then save to a file, stream WAV to stdout, or
-//! play it aloud. All status text goes to stderr so stdout can carry raw audio.
+//! argument or stdin, then synthesize. Long inputs are split into coherent
+//! chunks and synthesized one at a time, so playback and stdout streaming start
+//! on the first chunk instead of waiting for the whole document. All status
+//! text goes to stderr so stdout can carry raw audio.
 
 use std::io::{IsTerminal, Read, Write};
 use std::path::PathBuf;
+use std::time::Instant;
 
 use anyhow::{bail, Context, Result};
 use clap::{Parser, ValueEnum};
 use speak_core::{Device, Engine, ModelLocator, SynthesisRequest, BUILTIN_VOICES};
+
+mod player;
+mod wavstream;
+
+use player::StreamingPlayer;
 
 #[derive(Clone, Copy, Debug, ValueEnum)]
 enum DeviceArg {
@@ -52,9 +60,9 @@ struct Args {
     #[arg(long)]
     stdout: bool,
 
-    /// Play the audio aloud (macOS: afplay). Forces playback even when stdout
-    /// is not a terminal, e.g. when an agent or a pipe captures stdout.
-    /// Combine with --out to both save a file and play it.
+    /// Play the audio aloud. Forces playback even when stdout is not a
+    /// terminal, e.g. when an agent or a pipe captures stdout. Combine with
+    /// --out to both save a file and play it.
     #[arg(long)]
     play: bool,
 
@@ -69,6 +77,11 @@ struct Args {
     /// Speech speed factor (0.9-1.5 recommended).
     #[arg(long, default_value_t = 1.05)]
     speed: f32,
+
+    /// Pause inserted between paragraphs (seconds); inter-sentence and
+    /// inter-clause pauses are scaled down from this.
+    #[arg(long, default_value_t = 0.3)]
+    gap: f32,
 
     /// Inference device: cpu (default) or auto (try GPU/CoreML, fall back to
     /// CPU). CoreML currently can't run this model, so cpu is faster.
@@ -89,7 +102,13 @@ struct Args {
     #[arg(long)]
     list_voices: bool,
 
-    /// Print extra diagnostics to stderr, such as the inference backend.
+    /// Print how the text would be split into streaming chunks (text, length,
+    /// and trailing gap) and exit, without loading the model or synthesizing.
+    #[arg(long)]
+    dump_chunks: bool,
+
+    /// Print extra diagnostics to stderr, such as the inference backend and
+    /// time-to-first-audio.
     #[arg(long)]
     verbose: bool,
 }
@@ -155,7 +174,32 @@ fn main() -> Result<()> {
         return Ok(());
     }
 
-    let text = read_text(args.text)?;
+    let text = read_text(args.text.clone())?;
+
+    if args.dump_chunks {
+        let chunks = speak_core::plan_chunks(&text, args.gap);
+        eprintln!("{} chunk(s):", chunks.len());
+        for (i, c) in chunks.iter().enumerate() {
+            println!(
+                "[{:>3}] {:>3} chars, gap {:.2}s | {}",
+                i + 1,
+                c.text.chars().count(),
+                c.gap_after,
+                c.text
+            );
+        }
+        return Ok(());
+    }
+
+    // Bail before loading the model if there is nothing speakable: some inputs
+    // are non-empty yet normalize to no chunks (a lone code block, a horizontal
+    // rule, a bare image link), which would otherwise emit silent output and a
+    // misleading "Saved 0.00s" message.
+    if speak_core::plan_chunks(&text, args.gap).is_empty() {
+        bail!(
+            "no speakable text after normalization (input was only markup, code, or punctuation)"
+        );
+    }
 
     // Decide where the audio goes before doing expensive work, so failures are
     // reported early.
@@ -178,35 +222,162 @@ fn main() -> Result<()> {
     let request = SynthesisRequest::new(text)
         .lang(args.lang.clone())
         .steps(args.steps)
-        .speed(args.speed);
-    let audio = engine.speak(&args.voice, &request)?;
+        .speed(args.speed)
+        .silence(args.gap);
 
     match sink {
-        Sink::File(path) => {
-            audio.write_wav(&path)?;
-            eprintln!(
-                "Saved {:.2}s of audio to {}",
-                audio.duration_secs(),
-                path.display()
-            );
-            if args.play {
-                play(&audio)?;
-            }
-        }
+        Sink::Play => stream_to_player(&mut engine, &args.voice, &request, args.verbose)?,
         Sink::Stdout => {
-            let bytes = audio.to_wav_bytes()?;
-            let mut out = std::io::stdout().lock();
-            out.write_all(&bytes)
-                .context("failed to write WAV to stdout")?;
-            out.flush().ok();
-            if args.play {
-                play(&audio)?;
+            // With --play, also play aloud while streaming bytes to stdout.
+            let player = if args.play {
+                Some(
+                    StreamingPlayer::new(engine.sample_rate())
+                        .context("could not open an audio output device for --play")?,
+                )
+            } else {
+                None
+            };
+            wavstream::stream_to_stdout(
+                &mut engine,
+                &args.voice,
+                &request,
+                player.as_ref(),
+                args.verbose,
+            )?;
+            if let Some(player) = &player {
+                player.finish_and_wait();
             }
         }
-        Sink::Play => play(&audio)?,
+        Sink::File(path) => {
+            if args.play {
+                synth_to_file_and_play(&mut engine, &args.voice, &request, &path, args.verbose)?;
+            } else {
+                let audio = engine.speak(&args.voice, &request)?;
+                audio.write_wav(&path)?;
+                eprintln!(
+                    "Saved {:.2}s of audio to {}",
+                    audio.duration_secs(),
+                    path.display()
+                );
+            }
+        }
     }
 
     clean_exit(engine)
+}
+
+/// Synthesize chunk by chunk and play each chunk as soon as it is ready, so the
+/// first words are heard within a second or so rather than after the whole
+/// document is synthesized.
+fn stream_to_player(
+    engine: &mut Engine,
+    voice: &str,
+    request: &SynthesisRequest,
+    verbose: bool,
+) -> Result<()> {
+    let sample_rate = engine.sample_rate();
+    let player = StreamingPlayer::new(sample_rate)
+        .context("could not open an audio output device; use --out FILE or --stdout instead")?;
+
+    let show_progress = std::io::stderr().is_terminal();
+    let start = Instant::now();
+    let mut first_audio: Option<f64> = None;
+    let mut total_audio = 0.0f64;
+
+    engine.speak_stream(voice, request, |chunk| {
+        if first_audio.is_none() {
+            let ttfa = start.elapsed().as_secs_f64();
+            first_audio = Some(ttfa);
+            if verbose {
+                eprintln!("First audio ready after {ttfa:.2}s; playback starts now.");
+            }
+        }
+        let gap = (chunk.gap_after * sample_rate as f32) as usize;
+        player.push(&chunk.audio.samples);
+        player.push_silence(gap);
+        total_audio += chunk.audio.duration_secs() as f64 + chunk.gap_after as f64;
+
+        if show_progress {
+            eprint!("\rSpeaking… chunk {}/{}", chunk.index + 1, chunk.total);
+            let _ = std::io::stderr().flush();
+        }
+        // Keep the lookahead buffer bounded: synthesis runs several times
+        // faster than playback, so without this the whole document would be
+        // synthesized into memory immediately.
+        player.wait_until_buffer_below(sample_rate as usize * 20);
+        if player.is_stopped() {
+            bail!("audio output device stopped during playback");
+        }
+        Ok(())
+    })?;
+
+    if show_progress {
+        eprint!("\r\x1b[K");
+        let _ = std::io::stderr().flush();
+    }
+    player.finish_and_wait();
+
+    if verbose {
+        if let Some(ttfa) = first_audio {
+            eprintln!(
+                "Streamed {:.1}s of audio; first audio after {:.2}s.",
+                total_audio, ttfa
+            );
+        }
+    }
+    Ok(())
+}
+
+/// Synthesize to a WAV file while also playing it back as it is generated, in a
+/// single synthesis pass.
+fn synth_to_file_and_play(
+    engine: &mut Engine,
+    voice: &str,
+    request: &SynthesisRequest,
+    path: &std::path::Path,
+    verbose: bool,
+) -> Result<()> {
+    let sample_rate = engine.sample_rate();
+    let player = StreamingPlayer::new(sample_rate)
+        .context("could not open an audio output device; use --out FILE alone to just save")?;
+    let show_progress = std::io::stderr().is_terminal();
+    let mut samples: Vec<f32> = Vec::new();
+
+    engine.speak_stream(voice, request, |chunk| {
+        let gap = (chunk.gap_after * sample_rate as f32) as usize;
+        player.push(&chunk.audio.samples);
+        player.push_silence(gap);
+        samples.extend_from_slice(&chunk.audio.samples);
+        samples.extend(std::iter::repeat_n(0.0, gap));
+        if show_progress {
+            eprint!("\rSpeaking… chunk {}/{}", chunk.index + 1, chunk.total);
+            let _ = std::io::stderr().flush();
+        }
+        player.wait_until_buffer_below(sample_rate as usize * 20);
+        if player.is_stopped() {
+            bail!("audio output device stopped during playback");
+        }
+        Ok(())
+    })?;
+
+    if show_progress {
+        eprint!("\r\x1b[K");
+        let _ = std::io::stderr().flush();
+    }
+
+    let audio = speak_core::Audio {
+        samples,
+        sample_rate,
+    };
+    audio.write_wav(path)?;
+    eprintln!(
+        "Saved {:.2}s of audio to {}",
+        audio.duration_secs(),
+        path.display()
+    );
+    let _ = verbose;
+    player.finish_and_wait();
+    Ok(())
 }
 
 /// Read text from the positional argument, falling back to stdin.
@@ -226,30 +397,6 @@ fn read_text(arg: Option<String>) -> Result<String> {
         bail!("no text to speak: pass text as an argument or pipe it via stdin");
     }
     Ok(trimmed)
-}
-
-/// Play audio aloud. Wired up for macOS via `afplay`.
-fn play(audio: &speak_core::Audio) -> Result<()> {
-    #[cfg(target_os = "macos")]
-    {
-        let mut tmp = std::env::temp_dir();
-        tmp.push(format!("speak-{}.wav", std::process::id()));
-        audio.write_wav(&tmp)?;
-        let status = std::process::Command::new("afplay")
-            .arg(&tmp)
-            .status()
-            .context("failed to launch afplay")?;
-        let _ = std::fs::remove_file(&tmp);
-        if !status.success() {
-            bail!("afplay exited with {status}");
-        }
-        Ok(())
-    }
-    #[cfg(not(target_os = "macos"))]
-    {
-        let _ = audio;
-        bail!("live playback is only wired up for macOS (afplay); use --out FILE or --stdout instead");
-    }
 }
 
 /// Exit without running destructors. On macOS, dropping ONNX Runtime sessions
@@ -281,8 +428,14 @@ mod tests {
     #[test]
     fn out_path_always_writes_a_file() {
         // --out wins over every other flag and over the terminal state.
-        assert_eq!(choose_sink(wav(), false, false, true), Sink::File("out.wav".into()));
-        assert_eq!(choose_sink(wav(), true, true, false), Sink::File("out.wav".into()));
+        assert_eq!(
+            choose_sink(wav(), false, false, true),
+            Sink::File("out.wav".into())
+        );
+        assert_eq!(
+            choose_sink(wav(), true, true, false),
+            Sink::File("out.wav".into())
+        );
     }
 
     #[test]
@@ -310,7 +463,7 @@ mod tests {
 
     #[test]
     fn explicit_stdout_takes_precedence_over_play_for_the_primary_sink() {
-        // --stdout still streams; --play is applied additively in main().
+        // --stdout still streams; --play is applied additively.
         assert_eq!(choose_sink(None, true, true, false), Sink::Stdout);
     }
 }

@@ -92,11 +92,25 @@ speak "Slow and clear." -v F2 --speed 0.95 --steps 16 -o slow.wav
 speak --list-voices
 ```
 
-Flags: `-v/--voice` (M1..M5, F1..F5, or a custom style JSON path), `-o/--out`, `--stdout`, `--play`, `-l/--lang`, `-s/--steps`, `--speed`, `--device`, `--model-dir`, `--no-download`.
+Flags: `-v/--voice` (M1..M5, F1..F5, or a custom style JSON path), `-o/--out`, `--stdout`, `--play`, `-l/--lang`, `-s/--steps`, `--speed`, `--gap`, `--device`, `--model-dir`, `--no-download`, `--dump-chunks`.
 
 "Tone" variety comes from picking among the ten voices plus `--speed` / `--steps`; Supertonic-3 has no separate emotion dial.
 
-By default the destination is chosen automatically: `--out` writes a file, otherwise a non-terminal stdout (a pipe or redirect) streams WAV bytes and a real terminal plays aloud. Agents usually run with stdout captured, which would stream bytes; pass `--play` to force audible playback regardless, or `--stdout` to force byte streaming on a terminal. Note that playback uses the host machine's audio output (macOS `afplay`), so it needs an active local audio session.
+By default the destination is chosen automatically: `--out` writes a file, otherwise a non-terminal stdout (a pipe or redirect) streams WAV bytes and a real terminal plays aloud. Agents usually run with stdout captured, which would stream bytes; pass `--play` to force audible playback regardless, or `--stdout` to force byte streaming on a terminal. Playback uses the host machine's audio output via [`cpal`](https://crates.io/crates/cpal) (CoreAudio on macOS, ALSA/WASAPI elsewhere), so it needs an active local audio session.
+
+## Streaming long documents
+
+Long inputs are not synthesized in one shot. `speak` splits the text into coherent chunks — sentences grouped up to ~240 characters, never cut mid-word, never split on decimals/clause references (`4.4`, `5.2.1`), abbreviations, or list markers — and synthesizes them one at a time. Because each chunk's audio is emitted as soon as it is ready, **playback and stdout streaming begin on the first chunk** instead of after the whole document. On a ~3.9-minute document this cuts time-to-first-audio from ~40 s to under 1 s; synthesis (several times faster than real time) then stays ahead of playback so it sounds gapless.
+
+Markdown is normalized before synthesis: emphasis (`**`, `*`, `` ` ``), headings (`#`), horizontal rules, links, and bullets are reduced to their spoken text, while ordered-list numbers and sentence structure are preserved. Each chunk is a complete unit ending in punctuation, which matters because the model derives intonation from the chunk alone — there is no cross-chunk context. Pauses scale with the boundary: short between clauses, a beat between sentences, and a longer rest between paragraphs (tune the paragraph pause with `--gap SECONDS`, default `0.3`).
+
+When streaming a WAV to stdout, a header is written up front and PCM is flushed per chunk so a downstream player (`speak … --stdout | ffplay -`) hears audio as it arrives. Redirecting to a file (`speak … --stdout > out.wav`) seeks back and patches the real sizes into the header, producing a fully valid WAV; a true pipe gets the conventional streaming sentinel length.
+
+Inspect the segmentation for any text without synthesizing it:
+
+```bash
+speak "$(cat long-document.md)" --dump-chunks
+```
 
 ## Device / GPU
 
@@ -124,7 +138,18 @@ let wav_bytes = audio.to_wav_bytes()?;  // in-memory WAV (HTTP body, IPC, ...)
 let pcm = &audio.samples;               // raw mono f32 PCM
 ```
 
-`Engine::speak` takes `&mut self` (ONNX sessions are single-threaded). For a web server, put the engine behind a `Mutex` or keep a small pool and check one out per request. The `download` feature also exposes `speak_core::ensure_models(&locator)` if you want to pre-fetch without loading.
+`Engine::speak` returns the whole document at once. For long text, `Engine::speak_stream` synthesizes chunk by chunk and hands each chunk's audio to a callback the moment it is ready, so a consumer can start playing or sending audio while the rest is still being generated:
+
+```rust
+engine.speak_stream("F1", &SynthesisRequest::new(long_text), |chunk| {
+    // chunk.audio is this segment's PCM; chunk.gap_after is the silence (s) to
+    // play before the next chunk; chunk.index / chunk.total track progress.
+    player.enqueue(&chunk.audio.samples);
+    Ok(())  // returning Err stops the stream early
+})?;
+```
+
+`speak_core::plan_chunks(text, gap)` exposes the same segmentation without synthesizing, if you only need the chunk plan. `Engine::speak` takes `&mut self` (ONNX sessions are single-threaded). For a web server, put the engine behind a `Mutex` or keep a small pool and check one out per request. The `download` feature also exposes `speak_core::ensure_models(&locator)` if you want to pre-fetch without loading.
 
 ### Example downstream members (future)
 

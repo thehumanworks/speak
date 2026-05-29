@@ -20,6 +20,7 @@ download = ["speak-core/download"]
 speak-core = { path = "speak-core", default-features = false }
 clap = { workspace = true }
 anyhow = { workspace = true }
+cpal = { workspace = true }
 
 [target.'cfg(unix)'.dependencies]
 libc = { workspace = true }
@@ -53,6 +54,9 @@ clap = { version = "4.5", features = ["derive"] }
 # Blocking HTTP client for model downloads. Pinned to the 2.x API; default
 # features pull in rustls so HTTPS works without a system TLS dependency.
 ureq = "2"
+# Cross-platform real-time audio output, for streaming playback that starts on
+# the first synthesized chunk (CoreAudio on macOS).
+cpal = "0.16"
 
 [profile.release]
 # Faster, smaller self-contained binary for distribution to agents.

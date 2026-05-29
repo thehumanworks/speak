@@ -28,6 +28,8 @@
 #[allow(dead_code, clippy::all)]
 mod helper;
 
+mod text;
+
 #[cfg(feature = "download")]
 mod download;
 
@@ -41,12 +43,11 @@ use anyhow::{bail, Context, Result};
 use hound::{SampleFormat, WavSpec, WavWriter};
 
 pub use helper::{is_valid_lang, AVAILABLE_LANGS};
+pub use text::{plan_chunks, PlannedChunk};
 
 /// The ten built-in voices. `M*` are male, `F*` are female; each id is a
 /// distinct timbre and delivery rather than an emotion setting.
-pub const BUILTIN_VOICES: &[&str] = &[
-    "M1", "M2", "M3", "M4", "M5", "F1", "F2", "F3", "F4", "F5",
-];
+pub const BUILTIN_VOICES: &[&str] = &["M1", "M2", "M3", "M4", "M5", "F1", "F2", "F3", "F4", "F5"];
 
 /// Default model cache directory name, matching the Python `supertonic`
 /// package (`~/.cache/supertonic3`).
@@ -223,8 +224,8 @@ impl Audio {
         };
         let mut cursor = Cursor::new(Vec::<u8>::new());
         {
-            let mut writer = WavWriter::new(&mut cursor, spec)
-                .context("failed to start WAV encoder")?;
+            let mut writer =
+                WavWriter::new(&mut cursor, spec).context("failed to start WAV encoder")?;
             for &sample in &self.samples {
                 let clamped = sample.clamp(-1.0, 1.0);
                 writer.write_sample((clamped * 32767.0) as i16)?;
@@ -238,6 +239,26 @@ impl Audio {
     pub fn write_wav(&self, path: impl AsRef<Path>) -> Result<()> {
         helper::write_wav_file(path, &self.samples, self.sample_rate as i32)
     }
+}
+
+/// One segment of a streaming synthesis: the audio for a single text chunk,
+/// the silence to play after it, and where it sits in the stream. Yielded by
+/// [`Engine::speak_stream`] as soon as each chunk is synthesized, so playback
+/// can start on the first chunk while later chunks are still being generated.
+#[derive(Clone, Debug)]
+pub struct AudioChunk {
+    /// The synthesized speech for this chunk (no trailing gap silence).
+    pub audio: Audio,
+    /// Seconds of silence to play after this chunk before the next one. Scaled
+    /// to whether the chunk ends a clause, sentence, or paragraph; `0.0` for
+    /// the final chunk.
+    pub gap_after: f32,
+    /// The (normalized) text that was synthesized for this chunk.
+    pub text: String,
+    /// Zero-based index of this chunk.
+    pub index: usize,
+    /// Total number of chunks in the stream.
+    pub total: usize,
 }
 
 /// Where inference runs.
@@ -313,7 +334,11 @@ impl Engine {
             }
             Err(err) => return Err(err).context("failed to load ONNX models"),
         };
-        Ok(Self { locator, tts, backend })
+        Ok(Self {
+            locator,
+            tts,
+            backend,
+        })
     }
 
     /// Like [`Engine::load_with`], but first downloads any missing model files
@@ -341,8 +366,39 @@ impl Engine {
         self.backend
     }
 
-    /// Synthesize `req` with the given voice (built-in id or style JSON path).
+    /// Synthesize `req` with the given voice and return the whole audio at once,
+    /// chunks concatenated with the planned inter-chunk silences. This is the
+    /// convenient path for writing a file; [`Engine::speak_stream`] is the
+    /// incremental path for live playback or streaming output.
     pub fn speak(&mut self, voice: &str, req: &SynthesisRequest) -> Result<Audio> {
+        let sample_rate = self.sample_rate();
+        let mut samples: Vec<f32> = Vec::new();
+        self.speak_stream(voice, req, |chunk| {
+            samples.extend_from_slice(&chunk.audio.samples);
+            let gap = (chunk.gap_after * sample_rate as f32) as usize;
+            samples.extend(std::iter::repeat_n(0.0, gap));
+            Ok(())
+        })?;
+        Ok(Audio {
+            samples,
+            sample_rate,
+        })
+    }
+
+    /// Synthesize `req` chunk by chunk, invoking `on_chunk` with each chunk's
+    /// audio as soon as it is generated. The text is split into coherent units
+    /// (see [`plan_chunks`]) so that, unlike feeding the whole document at once,
+    /// the first audio is ready in a fraction of the time and a consumer can
+    /// begin playback immediately while later chunks synthesize.
+    ///
+    /// `on_chunk` returning an error stops the stream and propagates the error,
+    /// which a consumer can use to abort early.
+    pub fn speak_stream(
+        &mut self,
+        voice: &str,
+        req: &SynthesisRequest,
+        mut on_chunk: impl FnMut(AudioChunk) -> Result<()>,
+    ) -> Result<()> {
         if !is_valid_lang(&req.lang) {
             bail!(
                 "unsupported language '{}'; valid codes: {}",
@@ -358,15 +414,39 @@ impl Engine {
         let style = helper::load_voice_style(&[style_path_str], false)
             .with_context(|| format!("failed to load voice style '{voice}'"))?;
 
-        let (samples, _duration) = self
-            .tts
-            .call(&req.text, &req.lang, &style, req.steps, req.speed, req.silence)
-            .context("synthesis failed")?;
+        let chunks = plan_chunks(&req.text, req.silence);
+        let total = chunks.len();
+        let sample_rate = self.sample_rate();
 
-        Ok(Audio {
-            samples,
-            sample_rate: self.sample_rate(),
-        })
+        for (index, planned) in chunks.into_iter().enumerate() {
+            let (wav, duration) = self
+                .tts
+                .batch(
+                    std::slice::from_ref(&planned.text),
+                    std::slice::from_ref(&req.lang),
+                    &style,
+                    req.steps,
+                    req.speed,
+                )
+                .with_context(|| format!("synthesis failed on chunk {}", index + 1))?;
+
+            // The vocoder emits a fixed-size buffer; trim it to the predicted
+            // duration so trailing padding does not stack up between chunks.
+            let wav_len = ((sample_rate as f32 * duration[0]) as usize).min(wav.len());
+            let samples = wav[..wav_len].to_vec();
+
+            on_chunk(AudioChunk {
+                audio: Audio {
+                    samples,
+                    sample_rate,
+                },
+                gap_after: planned.gap_after,
+                text: planned.text,
+                index,
+                total,
+            })?;
+        }
+        Ok(())
     }
 }
 
