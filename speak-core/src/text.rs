@@ -458,10 +458,26 @@ fn heading_text(line: &str) -> Option<&str> {
     if (1..=6).contains(&hashes) {
         let rest = &line[hashes..];
         if rest.starts_with(' ') || rest.starts_with('\t') {
-            return Some(rest.trim().trim_end_matches('#').trim());
+            return Some(strip_closing_fence(rest.trim()));
         }
     }
     None
+}
+
+/// Strip an ATX closing fence from heading text. Per CommonMark, a trailing run
+/// of `#` only closes the heading when it is preceded by whitespace; otherwise
+/// the `#` is part of the text (e.g. `C#`, `F#`), so leave it.
+fn strip_closing_fence(text: &str) -> &str {
+    let body = text.trim_end_matches('#');
+    if body.len() == text.len() {
+        return text; // no trailing '#' run
+    }
+    // A closing fence must be set off by whitespace (or be the whole content).
+    if body.is_empty() || body.ends_with([' ', '\t']) {
+        body.trim_end()
+    } else {
+        text
+    }
 }
 
 /// Strip a leading unordered-list bullet or blockquote marker. Ordered-list
@@ -587,6 +603,26 @@ mod tests {
             texts(&chunks),
             vec!["Title Here", "We are happy to accept the terms."]
         );
+    }
+
+    #[test]
+    fn heading_keeps_trailing_hash_that_is_content() {
+        // A trailing '#' is an ATX closing fence only when preceded by
+        // whitespace; otherwise it is part of the heading text ("C#", "F#").
+        assert_eq!(heading_text("# C#"), Some("C#"));
+        assert_eq!(heading_text("## The key is F#"), Some("The key is F#"));
+        // A genuine closing fence (space then hashes) is still stripped.
+        assert_eq!(heading_text("# Title #"), Some("Title"));
+        assert_eq!(heading_text("## Section ##"), Some("Section"));
+        // No trailing hash, and a mid-token hash, are left untouched.
+        assert_eq!(heading_text("## Heading"), Some("Heading"));
+        assert_eq!(heading_text("# F# minor"), Some("F# minor"));
+    }
+
+    #[test]
+    fn heading_with_trailing_hash_is_spoken_in_full() {
+        let chunks = plan_chunks("# Learning C#\n\nLet's begin.", 0.3);
+        assert_eq!(chunks[0].text, "Learning C#");
     }
 
     #[test]
