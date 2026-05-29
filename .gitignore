@@ -42,7 +42,12 @@ Desktop.ini
 
 # Agent / assistant local state
 .cursor/hooks/state/
-.claude/
+# Share team-level Claude Code config (skills + hooks), keep personal settings
+# and runtime state private.
+.claude/*
+!.claude/skills/
+!.claude/settings.json
+.claude/settings.local.json
 
 # Debug / profiling artifacts
 *.profraw
