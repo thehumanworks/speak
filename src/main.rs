@@ -88,6 +88,10 @@ struct Args {
     /// List the built-in voices and exit.
     #[arg(long)]
     list_voices: bool,
+
+    /// Print extra diagnostics to stderr, such as the inference backend.
+    #[arg(long)]
+    verbose: bool,
 }
 
 #[derive(Debug, PartialEq)]
@@ -168,6 +172,9 @@ fn main() -> Result<()> {
     };
 
     let mut engine = load_engine(locator, args.device.into(), args.no_download)?;
+    if args.verbose {
+        eprintln!("Inference backend: {}", engine.backend());
+    }
     let request = SynthesisRequest::new(text)
         .lang(args.lang.clone())
         .steps(args.steps)

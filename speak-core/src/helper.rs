@@ -848,19 +848,9 @@ fn build_session(model_path: &str, cache_dir: &str, use_gpu: bool) -> Result<Ses
 }
 
 pub fn load_text_to_speech(onnx_dir: &str, use_gpu: bool) -> Result<TextToSpeech> {
-    // Deviations from upstream: GPU (CoreML) support is implemented here
-    // (upstream stubbed it out), and all logging goes to stderr so the SDK
-    // never writes to stdout (the CLI streams raw WAV bytes there).
-    let gpu_compiled = cfg!(feature = "coreml");
-    let backend = if use_gpu && gpu_compiled {
-        "GPU (CoreML), CPU fallback"
-    } else if use_gpu {
-        "CPU (built without CoreML support)"
-    } else {
-        "CPU"
-    };
-    eprintln!("Inference backend: {backend}");
-
+    // Deviation from upstream: GPU (CoreML) support is implemented here
+    // (upstream stubbed it out). This stays silent; the caller decides whether
+    // to report the resolved backend.
     let cfgs = load_cfgs(onnx_dir)?;
 
     let dp_path = format!("{}/duration_predictor.onnx", onnx_dir);

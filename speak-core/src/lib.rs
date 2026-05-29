@@ -22,8 +22,10 @@
 //! single-threaded per session. For a web server, put the engine behind a
 //! `Mutex`, or keep a small pool of engines and hand one out per request.
 
-// Vendored upstream code exposes more surface than the SDK uses.
-#[allow(dead_code)]
+// Vendored upstream code: it exposes more surface than the SDK uses and tracks
+// upstream's style rather than this crate's clippy profile, so silence both
+// here instead of editing the vendored file.
+#[allow(dead_code, clippy::all)]
 mod helper;
 
 #[cfg(feature = "download")]
@@ -251,10 +253,22 @@ pub enum Device {
     Auto,
 }
 
+/// Human-readable label for the execution backend a load resolved to.
+fn backend_label(use_gpu: bool) -> &'static str {
+    if use_gpu && cfg!(feature = "coreml") {
+        "GPU (CoreML), CPU fallback"
+    } else if use_gpu {
+        "CPU (built without CoreML support)"
+    } else {
+        "CPU"
+    }
+}
+
 /// The TTS engine: four ONNX sessions loaded once and reused across calls.
 pub struct Engine {
     locator: ModelLocator,
     tts: helper::TextToSpeech,
+    backend: &'static str,
 }
 
 impl Engine {
@@ -286,19 +300,20 @@ impl Engine {
             .to_string();
 
         let use_gpu = matches!(device, Device::Auto);
-        let tts = match helper::load_text_to_speech(&onnx_dir_str, use_gpu) {
-            Ok(tts) => tts,
+        let (tts, backend) = match helper::load_text_to_speech(&onnx_dir_str, use_gpu) {
+            Ok(tts) => (tts, backend_label(use_gpu)),
             Err(err) if use_gpu => {
                 // Belt-and-braces fallback: ONNX Runtime already falls back to
                 // CPU on its own, but if GPU session creation hard-fails, retry
                 // on CPU rather than giving up.
                 eprintln!("GPU initialization failed ({err}); retrying on CPU");
-                helper::load_text_to_speech(&onnx_dir_str, false)
-                    .context("failed to load ONNX models on CPU")?
+                let tts = helper::load_text_to_speech(&onnx_dir_str, false)
+                    .context("failed to load ONNX models on CPU")?;
+                (tts, backend_label(false))
             }
             Err(err) => return Err(err).context("failed to load ONNX models"),
         };
-        Ok(Self { locator, tts })
+        Ok(Self { locator, tts, backend })
     }
 
     /// Like [`Engine::load_with`], but first downloads any missing model files
@@ -318,6 +333,12 @@ impl Engine {
     /// The locator this engine was loaded from.
     pub fn locator(&self) -> &ModelLocator {
         &self.locator
+    }
+
+    /// Human-readable label for the execution backend in use, e.g. `"CPU"` or
+    /// `"GPU (CoreML), CPU fallback"`.
+    pub fn backend(&self) -> &str {
+        self.backend
     }
 
     /// Synthesize `req` with the given voice (built-in id or style JSON path).
@@ -346,5 +367,28 @@ impl Engine {
             samples,
             sample_rate: self.sample_rate(),
         })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn backend_label_is_cpu_when_gpu_not_requested() {
+        // CPU is reported regardless of which features are compiled in.
+        assert_eq!(backend_label(false), "CPU");
+    }
+
+    #[test]
+    #[cfg(feature = "coreml")]
+    fn backend_label_reports_gpu_when_built_with_coreml() {
+        assert_eq!(backend_label(true), "GPU (CoreML), CPU fallback");
+    }
+
+    #[test]
+    #[cfg(not(feature = "coreml"))]
+    fn backend_label_reports_cpu_only_without_coreml() {
+        assert_eq!(backend_label(true), "CPU (built without CoreML support)");
     }
 }
