@@ -1,0 +1,60 @@
+[package]
+name = "speak"
+version = "0.1.0"
+edition = "2021"
+description = "speak: an on-device text-to-speech command-line tool for AI agents (Supertonic-3, ONNX, compiled)."
+license = "MIT"
+
+[[bin]]
+name = "speak"
+path = "src/main.rs"
+
+[features]
+default = ["coreml", "download"]
+# GPU acceleration via Apple's CoreML execution provider.
+coreml = ["speak-core/coreml"]
+# Auto-download missing model files from Hugging Face on first run.
+download = ["speak-core/download"]
+
+[dependencies]
+speak-core = { path = "speak-core", default-features = false }
+clap = { workspace = true }
+anyhow = { workspace = true }
+
+[target.'cfg(unix)'.dependencies]
+libc = { workspace = true }
+
+[workspace]
+resolver = "2"
+members = ["speak-core"]
+
+# Shared dependency versions, pinned to match the upstream Supertonic Rust
+# example so the vendored helper.rs compiles unchanged.
+[workspace.dependencies]
+# Pin facade and -sys to the same rc the vendored helper.rs targets (rc.12:
+# public session/value modules, tuple-returning try_extract_tensor). rc.12's
+# download-binaries build script requires an explicit TLS backend, so enable
+# tls-native (macOS Security.framework / system TLS — no extra C build).
+ort = "=2.0.0-rc.12"
+ort-sys = { version = "=2.0.0-rc.12", features = ["tls-native"] }
+ndarray = { version = "0.17", features = ["rayon"] }
+rand = "0.8"
+rand_distr = "0.4"
+rayon = "1.10"
+hound = "3.5"
+rustfft = "6.2"
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+anyhow = "1.0"
+unicode-normalization = "0.1"
+regex = "1.10"
+libc = "0.2"
+clap = { version = "4.5", features = ["derive"] }
+# Blocking HTTP client for model downloads. Pinned to the 2.x API; default
+# features pull in rustls so HTTPS works without a system TLS dependency.
+ureq = "2"
+
+[profile.release]
+# Faster, smaller self-contained binary for distribution to agents.
+lto = "thin"
+strip = true

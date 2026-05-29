@@ -1,0 +1,51 @@
+# Rust / Cargo
+/target/
+**/*.rs.bk
+*.pdb
+
+# Local Supertonic model cache (when --model-dir or SUPERTONIC_CACHE_DIR points here)
+/.cache/
+/onnx/
+/voice_styles/
+.download.lock
+.*.part
+
+# Large model weights (fetched from Hugging Face at runtime, never committed)
+*.onnx
+
+# CLI / synthesis output
+*.wav
+
+# Environment and secrets
+.env
+.env.*
+!.env.example
+
+# macOS / Windows
+.DS_Store
+.AppleDouble
+.LSOverride
+Thumbs.db
+ehthumbs.db
+Desktop.ini
+
+# Editors and IDEs
+.idea/
+*.iml
+.vscode/
+*.swp
+*.swo
+*~
+.project
+.classpath
+.settings/
+
+# Agent / assistant local state
+.cursor/hooks/state/
+.claude/
+
+# Debug / profiling artifacts
+*.profraw
+*.profdata
+perf.data*
+flamegraph.svg

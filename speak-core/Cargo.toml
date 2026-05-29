@@ -1,0 +1,31 @@
+[package]
+name = "speak-core"
+version = "0.1.0"
+edition = "2021"
+description = "On-device TTS SDK (Supertonic-3 / ONNX Runtime). Reusable by CLI, Tauri, or a web server."
+license = "MIT"
+
+[features]
+# GPU acceleration via Apple's CoreML execution provider (GPU + Neural Engine),
+# and ad-hoc model download from Hugging Face, both on by default. Build with
+# --no-default-features for a CPU-only, offline, fully portable binary.
+default = ["coreml", "download"]
+coreml = ["ort/coreml"]
+# Fetch missing Supertonic model files from Hugging Face into the cache.
+download = ["dep:ureq"]
+
+[dependencies]
+ort = { workspace = true }
+ort-sys = { workspace = true }
+ndarray = { workspace = true }
+rand = { workspace = true }
+rand_distr = { workspace = true }
+rayon = { workspace = true }
+hound = { workspace = true }
+rustfft = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+anyhow = { workspace = true }
+unicode-normalization = { workspace = true }
+regex = { workspace = true }
+ureq = { workspace = true, optional = true }
