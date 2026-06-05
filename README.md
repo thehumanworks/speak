@@ -19,6 +19,33 @@ The CLI is a thin layer over the SDK. New front-ends (Tauri, web server, a webpa
 
 ## Install
 
+### Run without installing (npm / Bun)
+
+The repo ships a thin npm package that downloads a prebuilt `speak` binary from [GitHub Releases](https://github.com/thehumanworks/speak/releases) (or builds from source when you install straight from git and no release exists yet):
+
+```bash
+# Bun (GitHub)
+bunx github:thehumanworks/speak --list-voices
+
+# npm (GitHub)
+npx -y github:thehumanworks/speak --list-voices
+
+# npm (registry, after publish)
+npx -y @nothumanwork/speak --list-voices
+```
+
+The first invocation may take a few minutes if it compiles from source (git installs); release installs are much faster.
+
+`thehumanworks/speak` is a private repository today. For release downloads, set `GITHUB_TOKEN` or `SPEAK_GITHUB_TOKEN` to a token with `contents:read`, or rely on `gh auth token` when the GitHub CLI is signed in. Useful overrides: `SPEAK_VERSION=v0.1.0` pins a release tag, `SPEAK_REPO=owner/repo` selects another repository, and `SPEAK_NPM_SKIP_DOWNLOAD=1` skips the postinstall step (packaging tests only).
+
+Publish to npm (scoped public package, requires org access and MFA on your account):
+
+```bash
+npm publish
+```
+
+### Cargo install
+
 Install the `speak` command system-wide (into `~/.cargo/bin`) straight from a checkout:
 
 ```bash

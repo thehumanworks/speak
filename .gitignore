@@ -1,3 +1,6 @@
+# npm wrapper vendored binary (downloaded or built on postinstall)
+/vendor/
+
 # Rust / Cargo
 /target/
 **/*.rs.bk

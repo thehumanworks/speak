@@ -1,0 +1,34 @@
+{
+  "name": "@nothumanwork/speak",
+  "version": "0.1.0",
+  "description": "On-device text-to-speech CLI for AI agents (Supertonic-3, ONNX).",
+  "license": "MIT",
+  "author": "Tomas Roda <rodat.dev@proton.me>",
+  "private": false,
+  "bin": {
+    "speak": "bin/speak.js"
+  },
+  "scripts": {
+    "postinstall": "node scripts/npm-install.js",
+    "test:npm-package": "node --check scripts/npm-install.js && node --check bin/speak.js && SPEAK_NPM_SKIP_DOWNLOAD=1 node scripts/npm-install.js",
+    "smoke:local": "node scripts/smoke-npm-local.mjs",
+    "smoke:github:bunx": "bunx github:thehumanworks/speak --list-voices",
+    "smoke:github:npx": "npx -y github:thehumanworks/speak --list-voices"
+  },
+  "files": [
+    "bin/speak.js",
+    "scripts/npm-install.js",
+    "scripts/smoke-npm-local.mjs",
+    "README.md"
+  ],
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/thehumanworks/speak.git"
+  },
+  "publishConfig": {
+    "access": "public"
+  },
+  "engines": {
+    "node": ">=18"
+  }
+}
