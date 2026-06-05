@@ -36,7 +36,13 @@ npx -y @nothumanwork/speak --list-voices
 
 The first invocation may take a few minutes if it compiles from source (git installs); release installs are much faster.
 
-`thehumanworks/speak` is a private repository today. For release downloads, set `GITHUB_TOKEN` or `SPEAK_GITHUB_TOKEN` to a token with `contents:read`, or rely on `gh auth token` when the GitHub CLI is signed in. Useful overrides: `SPEAK_VERSION=v0.1.0` pins a release tag, `SPEAK_REPO=owner/repo` selects another repository, and `SPEAK_NPM_SKIP_DOWNLOAD=1` skips the postinstall step (packaging tests only).
+`thehumanworks/speak` is a private repository today. Implications:
+
+- **`npx -y github:thehumanworks/speak`** works with your normal Git credentials (npm clones over git).
+- **`bunx github:thehumanworks/speak`** uses Bun’s unauthenticated GitHub tarball API and returns 404 on private repos. Use `npx` from GitHub, publish to npm and run **`bunx @nothumanwork/speak`**, or make the repository public.
+- **Release downloads** (fast installs once [releases](https://github.com/thehumanworks/speak/releases) exist) need `GITHUB_TOKEN` or `SPEAK_GITHUB_TOKEN` with `contents:read`, or `gh auth token` when the GitHub CLI is signed in.
+
+Useful overrides: `SPEAK_VERSION=v0.1.0` pins a release tag, `SPEAK_REPO=owner/repo` selects another repository, and `SPEAK_NPM_SKIP_DOWNLOAD=1` skips the postinstall step (packaging tests only).
 
 Publish to npm (scoped public package, requires org access and MFA on your account):
 

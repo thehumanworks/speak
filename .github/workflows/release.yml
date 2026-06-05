@@ -71,6 +71,10 @@ jobs:
         with:
           key: ${{ matrix.target }}-${{ matrix.features }}
 
+      - name: Install Linux audio dependencies
+        if: runner.os == 'Linux'
+        run: sudo apt-get update && sudo apt-get install -y libasound2-dev pkg-config
+
       - name: Build release binary (default features)
         if: matrix.features == 'default'
         shell: bash
