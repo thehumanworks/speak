@@ -19,7 +19,11 @@
     "bin/speak.js",
     "scripts/npm-install.js",
     "scripts/smoke-npm-local.mjs",
-    "README.md"
+    "README.md",
+    "Cargo.toml",
+    "Cargo.lock",
+    "src/",
+    "speak-core/"
   ],
   "repository": {
     "type": "git",
