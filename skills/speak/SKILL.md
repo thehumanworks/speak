@@ -5,9 +5,12 @@ description: >-
   Runtime) built in this repository. Use whenever the user wants to hear text
   read aloud, narrate or voice a message, generate spoken audio or a WAV/voice
   file from text, add text-to-speech (TTS), choose a voice, read a
-  document/markdown/article aloud, or speak the result of a task back to the
-  user — even if they only say "say this out loud", "read this to me", or "make
-  an audio version". Covers the critical output routing (stdout carries raw
+  document/markdown/article aloud, speak the result of a task back to the user,
+  or have the agent notify/alert/announce out loud when a task finishes or makes
+  progress (for example "use speak to tell me when you're done", "read your last
+  message to me", "announce progress with /speak") — even if they only say "say
+  this out loud", "read this to me", or "make an audio version". Covers the
+  critical output routing (stdout carries raw
   audio bytes, so use `--play` to make it audible or `--out` to save a file),
   the voice/speed/quality flags, streaming long documents, and the first-run
   model download.
@@ -19,6 +22,11 @@ description: >-
 calls). It is a single compiled binary built on the Supertonic-3 model and ONNX
 Runtime. Give it text, and it either plays the audio aloud, saves a WAV file, or
 streams WAV bytes to another program.
+
+Run it without installing anything via `bunx @nothumanwork/speak …` (see "How to
+invoke it" below). The examples in this skill write just `speak` for brevity;
+substitute `bunx @nothumanwork/speak` for that word unless the binary is already
+on your `PATH`.
 
 ## The one rule that matters most: where does the audio go?
 
@@ -49,24 +57,25 @@ is none, prefer `--out`.
 
 ## How to invoke it
 
-Prefer the installed command if it is on `PATH`:
+Prefer running it through Bun, which pulls the published binary from the npm
+registry and caches it — no install step, and it works without the repository
+checked out. Do not assume a `speak` binary is already on `PATH`:
 
 ```bash
-speak --list-voices
+bunx @nothumanwork/speak --list-voices
+bunx @nothumanwork/speak "Your build finished." --play
 ```
 
-If it is not installed, run it from this repository instead:
+The first run downloads a prebuilt `speak` binary (or builds it from source if
+no release matches the platform), then later runs reuse the cache and are fast.
+`npx -y @nothumanwork/speak …` is the npm-only equivalent. Use the registry
+package name `@nothumanwork/speak`, not `bunx github:thehumanworks/speak`, which
+404s because the GitHub repository is private (see `references/cli-reference.md`).
 
-```bash
-cargo run --release -- "Hello." --play          # from the repo root
-# or build once and call the binary:
-cargo build --release && ./target/release/speak "Hello." --play
-```
-
-It can also be run with no local install via the npm wrapper, which fetches a
-prebuilt binary (or builds from source): `npx -y github:thehumanworks/speak
-"Hello." --play`. See `references/cli-reference.md` for the npm/bunx details and
-their private-repo caveats.
+Only call the bare `speak …` form when the binary is genuinely installed on
+`PATH` already (for example via `cargo install --path .`). As a last resort
+inside a checkout, `cargo run --release -- "Hello." --play` builds and runs from
+source.
 
 ## Quick start
 
@@ -87,6 +96,39 @@ speak "Slow and clear." --voice F2 --speed 0.95 --steps 16 --out slow.wav
 # See the available voices
 speak --list-voices
 ```
+
+## Speaking your reply back as a notification
+
+A common ask is for the agent to announce task progress or its final answer out
+loud — "tell me with speak when you're done", "read your last message to me". To
+do this, run `speak` on the text you would otherwise just print, and always pass
+`--play` so it is audible even though your stdout is captured:
+
+```bash
+bunx @nothumanwork/speak "Done — all 142 tests pass and the branch is pushed." --play
+```
+
+Two things make this reliable:
+
+- **Keep the spoken version short.** A one or two sentence summary is a better
+  spoken notification than reading a long markdown message verbatim. Write a
+  brief line for the ear, even if your on-screen reply is longer.
+- **Pass awkward text on stdin, not as a shell argument.** A message with quotes,
+  backticks, or newlines is easy to mangle through shell quoting. Pipe it or use
+  a heredoc instead:
+
+  ```bash
+  bunx @nothumanwork/speak --play <<'EOF'
+  Finished the refactor. Two files changed, tests are green.
+  EOF
+  ```
+
+`--play` blocks until playback finishes, so the command returns once the user has
+heard it. Note that making this happen automatically on *every* turn is a harness
+behavior, not something the skill can enforce: this skill makes the agent capable
+of speaking a notification, but a recurring "always speak your last message" rule
+needs a Stop hook (or a standing instruction you keep following) to fire it each
+time.
 
 ## Voices
 

@@ -10,6 +10,12 @@ routing, and error behavior.
 speak [OPTIONS] [TEXT]
 ```
 
+The recommended way to run it without installing anything is `bunx
+@nothumanwork/speak [OPTIONS] [TEXT]` (or `npx -y @nothumanwork/speak …`). The
+examples in this file write just `speak` for brevity; substitute the `bunx`
+form unless the binary is already installed on `PATH`. See "Running without a
+local install" below.
+
 `TEXT` is the text to speak. If omitted, `speak` reads the text from standard
 input, so both of these work:
 
@@ -133,26 +139,27 @@ use.
 
 ## Running without a local install (npm / Bun)
 
-The repository ships a thin npm package that downloads a prebuilt `speak` binary
-from GitHub Releases (or builds from source when installed straight from git and
-no release exists yet):
+The package `@nothumanwork/speak` is published on the npm registry, so the
+preferred install-free invocation is through the registry (it fetches a prebuilt
+`speak` binary, or builds from source if no release matches the platform, and
+caches it):
 
 ```bash
-# from GitHub over npm (uses your normal Git credentials)
-npx -y github:thehumanworks/speak --list-voices
-
-# from the npm registry once published
-npx -y @nothumanwork/speak --list-voices
+# recommended: registry package via Bun
 bunx @nothumanwork/speak --list-voices
+
+# npm-only equivalent
+npx -y @nothumanwork/speak --list-voices
 ```
 
-Caveats for the currently private GitHub repo: `npx -y github:thehumanworks/speak`
-works with your Git credentials, but `bunx github:thehumanworks/speak` uses an
-unauthenticated tarball API and returns 404 on a private repo — use `npx` from
-GitHub, or publish to npm and use `bunx @nothumanwork/speak`. Fast release
-downloads need `GITHUB_TOKEN` / `SPEAK_GITHUB_TOKEN` (with `contents:read`) or a
-signed-in `gh`. Overrides: `SPEAK_VERSION=v0.1.0` pins a tag, `SPEAK_REPO=owner/repo`
-selects another repository, `SPEAK_NPM_SKIP_DOWNLOAD=1` skips the postinstall.
+Avoid the GitHub-tarball form `bunx github:thehumanworks/speak`: Bun uses an
+unauthenticated tarball API that returns 404 because the repository is private.
+`npx -y github:thehumanworks/speak` does work (npm clones over git with your
+credentials) but is not needed now that the registry package exists. Fast release
+downloads (used by the postinstall) need `GITHUB_TOKEN` / `SPEAK_GITHUB_TOKEN`
+(with `contents:read`) or a signed-in `gh`. Overrides: `SPEAK_VERSION=v0.1.0`
+pins a tag, `SPEAK_REPO=owner/repo` selects another repository,
+`SPEAK_NPM_SKIP_DOWNLOAD=1` skips the postinstall.
 
 ## Worked examples
 
