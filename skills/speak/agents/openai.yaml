@@ -1,0 +1,4 @@
+interface:
+  display_name: "Speak"
+  short_description: "Hear brief updates and final summaries"
+  default_prompt: "Use $speak to give brief spoken progress updates and a conversational spoken final summary while keeping important details written."
