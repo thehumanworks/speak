@@ -7,33 +7,35 @@ on:
       - main
 
 permissions:
-  contents: write
+  contents: read
 
 jobs:
   format:
-    if: github.event_name == 'pull_request'
     name: Rust formatting
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-        with:
-          ref: ${{ github.head_ref }}
       - uses: dtolnay/rust-toolchain@stable
         with:
           components: rustfmt
-      - name: Format changed Rust files
-        run: rustfmt --edition 2021 --config skip_children=true src/main.rs src/ios.rs src/wavinput.rs
-      - name: Commit formatter output
-        shell: bash
-        run: |
-          if git diff --quiet -- src/main.rs src/ios.rs src/wavinput.rs; then
-            exit 0
-          fi
-          git config user.name github-actions[bot]
-          git config user.email 41898282+github-actions[bot]@users.noreply.github.com
-          git add src/main.rs src/ios.rs src/wavinput.rs
-          git commit -m "format rust sources"
-          git push origin "HEAD:${{ github.head_ref }}"
+      - name: Check changed Rust files
+        run: rustfmt --edition 2021 --check --config skip_children=true src/main.rs src/ios.rs src/wavinput.rs
+
+  lint:
+    name: Clippy
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: clippy
+      - name: Install Linux audio dependencies
+        run: sudo apt-get update && sudo apt-get install -y libasound2-dev pkg-config
+      - name: Run Clippy
+        run: cargo clippy --workspace --all-targets --locked --no-default-features -- -D warnings
 
   test:
     name: Test ${{ matrix.os }}
