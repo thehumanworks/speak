@@ -1,195 +1,327 @@
 # speak
 
-A compiled, on-device text-to-speech stack built on [Supertonic-3](https://github.com/supertone-inc/supertonic) and ONNX Runtime. It produces a small self-contained binary (`speak`) for AI agents, and a reusable SDK crate (`speak-core`) that a Tauri app or a Rust web server can depend on directly.
+A compiled, on-device text-to-speech stack built on
+[Supertonic-3](https://github.com/supertone-inc/supertonic) and ONNX Runtime.
+It produces a self-contained `speak` CLI for AI agents and a reusable
+`speak-core` Rust crate for native applications and services.
 
-## Why this shape
+## Architecture
 
-The TTS pipeline is just four ONNX models plus a codepoint-based text front-end and per-voice style files. None of that is Python-specific, so it ports cleanly to a compiled language. ONNX Runtime is statically linked into the binary by the `ort` crate, so the executable is self-contained; the ~385 MB of model weights are loaded from a cache directory at runtime rather than baked in.
+The TTS pipeline is four ONNX models, a codepoint-based text front-end, and
+per-voice style files. The executable contains ONNX Runtime; the roughly 385 MB
+of model weights are loaded from a per-user cache rather than embedded in the
+binary.
 
-```
+```text
 speak/
-  Cargo.toml      # workspace root + the `speak` binary package
-  src/main.rs     # the CLI: args, stdin, file/stdout/playback
-  speak-core/     # the SDK: load models, synthesize, return audio (UI-agnostic)
-    src/lib.rs      # public API: Engine, ModelLocator, SynthesisRequest, Audio
-    src/helper.rs   # vendored upstream pipeline (text front-end + 4-model chain)
+  Cargo.toml
+  src/
+    main.rs       # CLI, destination routing, SSH/iOS hand-off
+    ios.rs        # short-lived browser playback endpoint
+    player.rs     # local cpal playback
+    wavstream.rs  # incremental WAV output
+    wavinput.rs   # incremental WAV input/local playback
+  speak-core/
+    src/lib.rs    # Engine, ModelLocator, SynthesisRequest, Audio
+    src/helper.rs # vendored upstream inference pipeline
 ```
 
-The CLI is a thin layer over the SDK. New front-ends (Tauri, web server, a webpage reader) become new workspace members that depend on `speak-core` — they never touch the model plumbing.
+The CLI is a thin layer over `speak-core`. New front-ends should depend on the
+SDK rather than reaching into the model plumbing.
 
 ## Install
 
-### Run without installing (npm / Bun)
+### npm or Bun
 
-The repo ships a thin npm package that downloads a prebuilt `speak` binary from [GitHub Releases](https://github.com/thehumanworks/speak/releases) (or builds from source when you install straight from git and no release exists yet):
+The npm package installs a matching prebuilt binary from GitHub Releases and
+falls back to a source build when necessary:
 
 ```bash
-# Bun (GitHub)
-bunx github:thehumanworks/speak --list-voices
-
-# npm (GitHub)
-npx -y github:thehumanworks/speak --list-voices
-
-# npm (registry, after publish)
+bunx @nothumanwork/speak --list-voices
 npx -y @nothumanwork/speak --list-voices
 ```
 
-The first invocation may take a few minutes if it compiles from source (git installs); release installs are much faster.
-
-`thehumanworks/speak` is a private repository today. Implications:
-
-- **`npx -y github:thehumanworks/speak`** works with your normal Git credentials (npm clones over git).
-- **`bunx github:thehumanworks/speak`** uses Bun’s unauthenticated GitHub tarball API and returns 404 on private repos. Use `npx` from GitHub, publish to npm and run **`bunx @nothumanwork/speak`**, or make the repository public.
-- **Release downloads** (fast installs once [releases](https://github.com/thehumanworks/speak/releases) exist) need `GITHUB_TOKEN` or `SPEAK_GITHUB_TOKEN` with `contents:read`, or `gh auth token` when the GitHub CLI is signed in.
-
-Useful overrides: `SPEAK_VERSION=v0.1.0` pins a release tag, `SPEAK_REPO=owner/repo` selects another repository, and `SPEAK_NPM_SKIP_DOWNLOAD=1` skips the postinstall step (packaging tests only).
-
-Publish to npm (scoped public package, requires org access and MFA on your account):
+You can also install directly from this GitHub repository:
 
 ```bash
-npm publish
+npx -y github:thehumanworks/speak --list-voices
 ```
 
-### Cargo install
+Useful installer overrides:
 
-Install the `speak` command system-wide (into `~/.cargo/bin`) straight from a checkout:
+- `SPEAK_VERSION=v0.1.0` pins a release tag.
+- `SPEAK_REPO=owner/repo` selects another release repository.
+- `SPEAK_GITHUB_TOKEN` or `GITHUB_TOKEN` authenticates release downloads.
+- `SPEAK_NPM_SKIP_DOWNLOAD=1` skips binary installation for packaging tests.
+
+### Cargo
 
 ```bash
 cargo install --path .
 ```
 
-The first install downloads and statically links ONNX Runtime, so it takes a few minutes; later installs are fast. Make sure `~/.cargo/bin` is on your `PATH` (it is by default with a standard Rust install), then `speak` is available everywhere:
-
-```bash
-speak --list-voices
-```
-
-The first time you run `speak`, it downloads the ~385 MB model from Hugging Face into a per-user cache (see [Models](#models)), so there is no separate setup step.
-
-For a CPU-only, offline, fully portable binary (no CoreML, no auto-download), disable the default features:
+For a CPU-only, offline build with no automatic model download:
 
 ```bash
 cargo install --path . --no-default-features
 ```
 
-The default features are `coreml` (GPU execution provider) and `download` (fetch the model on first run); you can enable them individually, e.g. `--no-default-features --features download`.
-
-To install from a git remote once this is published, name the binary crate:
+To keep automatic downloads while disabling CoreML:
 
 ```bash
-cargo install --git <repo-url> speak
+cargo install --path . --no-default-features --features download
 ```
 
-## Build (without installing)
+### Build from a checkout
 
 ```bash
-cargo build --release      # first build downloads & links ONNX Runtime
-# binary: target/release/speak
+cargo build --release
+# target/release/speak
 ```
 
-## Models
+The first build downloads and links ONNX Runtime. The first synthesis downloads
+the model cache unless downloads were disabled.
 
-On first run `speak` downloads the model from the [`Supertone/supertonic-3`](https://huggingface.co/Supertone/supertonic-3) repository on Hugging Face into a per-user cache, reporting progress on stderr. The download is pinned to a specific immutable commit, so every build fetches byte-identical weights; bumping the version is a one-line change to `MODEL_REVISION` in `speak-core/src/download.rs`. Only missing files are fetched, each is written atomically (a partial download never looks complete), and concurrent first runs are serialized by a lock file so two processes never download the same files at once. Subsequent runs start instantly. The cache layout is:
+## Model cache
 
-```
+By default, model assets are stored under `~/.cache/supertonic3`:
+
+```text
 ~/.cache/supertonic3/
   onnx/{duration_predictor,text_encoder,vector_estimator,vocoder}.onnx
   onnx/{tts.json,unicode_indexer.json}
   voice_styles/{M1..M5,F1..F5}.json
 ```
 
-Override the base directory with `--model-dir`, or the `SUPERTONIC_CACHE_DIR` environment variable. Pass `--no-download` to disable fetching and fail if the cache is incomplete (useful for offline or air-gapped use, where you would populate the directory yourself, e.g. `git clone https://huggingface.co/Supertone/supertonic-3` into it). If files are missing and downloading is off, `speak` prints exactly which ones.
+Use `--model-dir` or `SUPERTONIC_CACHE_DIR` to choose another base directory.
+Use `--no-download` to fail instead of fetching missing files. Downloads are
+pinned to an immutable Hugging Face revision, written atomically, and protected
+by a lock so concurrent first runs do not download the same files twice.
 
-## CLI usage
+## CLI examples
 
 ```bash
-# Speak aloud (default when stdout is a terminal)
+# Play through this machine's default audio device
 speak "Hello from a compiled binary."
 
-# Save to a WAV file
+# Explicit playback, including when stdout is captured by an agent
+speak "Build complete." --play
+
+# Save a seekable WAV
 speak "Save me to disk." --voice F1 --out hello.wav
 
 # Read text from stdin
 echo "Piped in from stdin." | speak --out out.wav
 
-# Stream WAV to stdout (e.g. for an agent to capture)
-speak "Pipe me." --stdout > out.wav
+# Stream WAV bytes incrementally
+speak "Pipe me." --stdout | ffplay -nodisp -autoexit -loglevel error -i pipe:0
 
-# Force playback even when stdout is captured (e.g. invoked by an agent)
-speak "Heads up." --play
+# Inspect long-text segmentation without loading the model
+speak "$(cat long-document.md)" --dump-chunks
 
-# Female voice, slower, higher quality
-speak "Slow and clear." -v F2 --speed 0.95 --steps 16 -o slow.wav
-
-# List built-in voices
+# List voices
 speak --list-voices
 ```
 
-Flags: `-v/--voice` (M1..M5, F1..F5, or a custom style JSON path), `-o/--out`, `--stdout`, `--play`, `-l/--lang`, `-s/--steps`, `--speed`, `--gap`, `--device`, `--model-dir`, `--no-download`, `--dump-chunks`.
+Common flags:
 
-"Tone" variety comes from picking among the ten voices plus `--speed` / `--steps`; Supertonic-3 has no separate emotion dial.
+- `-v, --voice`: `M1` through `M5`, `F1` through `F5`, or a custom style JSON.
+- `-o, --out`: write a WAV file.
+- `--stdout`: stream WAV bytes to stdout.
+- `--play`: play on the machine running `speak`.
+- `--play-stdin`: play the canonical WAV received on stdin without loading the model.
+- `--ios`: expose a short-lived browser player for an iPhone or iPad SSH client.
+- `-l, --lang`, `-s, --steps`, `--speed`, and `--gap`: synthesis controls.
+- `--device`, `--model-dir`, `--no-download`, `--verbose`.
 
-By default the destination is chosen automatically: `--out` writes a file, otherwise a non-terminal stdout (a pipe or redirect) streams WAV bytes and a real terminal plays aloud. Agents usually run with stdout captured, which would stream bytes; pass `--play` to force audible playback regardless, or `--stdout` to force byte streaming on a terminal. Playback uses the host machine's audio output via [`cpal`](https://crates.io/crates/cpal) (CoreAudio on macOS, ALSA/WASAPI elsewhere), so it needs an active local audio session.
+Output is mode-specific: `--stdout` writes only WAV bytes to stdout, while
+`--ios` writes only the tappable playback URL to stdout. Progress, diagnostics,
+paths, and warnings are written to stderr.
+
+## Listen over SSH from a desktop client
+
+Install `speak` on both machines. Synthesize on the remote host through a
+non-PTY SSH channel and play the returned WAV stream on the local machine:
+
+```bash
+printf '%s' 'Synthesized remotely and played locally.' \
+  | ssh -T user@host 'speak --stdout' \
+  | speak --play-stdin
+```
+
+`--play-stdin` validates the canonical mono PCM16 WAV emitted by `--stdout` and
+plays it incrementally. It does not load the TTS model. `ssh -T` matters: do not
+send binary WAV data through an interactive PTY.
+
+An external local player also works:
+
+```bash
+printf '%s' 'Remote audio.' \
+  | ssh -T user@host 'speak --stdout' \
+  | ffplay -nodisp -autoexit -loglevel error -i pipe:0
+```
+
+## Listen from an iPhone or iPad SSH client
+
+SSH terminal channels do not carry an audio-device abstraction. Running
+`--play` in an SSH shell therefore targets the **remote host's** sound device,
+not the iPhone or iPad. `--ios` uses the generic mechanism available to
+third-party SSH clients: an SSH local forward plus a short-lived browser player.
+
+### 1. Configure a local forward in the iOS SSH client
+
+Forward this address on the iPhone or iPad:
+
+```text
+local  127.0.0.1:17820
+remote 127.0.0.1:17820
+```
+
+In an OpenSSH-compatible client, the equivalent connection is:
+
+```bash
+ssh -L 17820:127.0.0.1:17820 user@host
+```
+
+Keep the SSH connection and forward active while listening.
+
+### 2. Generate audio in the remote shell
+
+```bash
+speak --ios "This audio was synthesized remotely and is playing on iOS."
+```
+
+`speak` will:
+
+1. bind only to remote loopback by default;
+2. synthesize a complete, seekable WAV;
+3. create a random 128-bit bearer path;
+4. print only a URL such as `http://127.0.0.1:17820/<token>` to stdout;
+5. serve an iOS-compatible player with byte-range support; and
+6. shut down after the audio is fetched/played or after five minutes.
+
+Tap the printed URL. Safari may require one tap on the Play control because iOS
+can block audible autoplay.
+
+### Alternative local port
+
+When the iOS client forwards a different local port, keep the remote destination
+at `17820` and override only the URL that `speak` prints:
+
+```text
+local  127.0.0.1:8080
+remote 127.0.0.1:17820
+```
+
+```bash
+speak --ios --ios-url http://127.0.0.1:8080 "Hello."
+```
+
+### Trusted private-network access
+
+Some iOS clients suspend their SSH tunnel when an external browser is opened.
+Prefer an in-app browser or split view where available. On a trusted private
+network or tailnet, the player can instead listen on a reachable interface:
+
+```bash
+speak --ios \
+  --ios-bind 0.0.0.0:17820 \
+  --ios-url http://100.64.0.10:17820 \
+  "Hello over the private network."
+```
+
+Do not expose the plain-HTTP endpoint directly to the public internet. Use an
+SSH tunnel, a trusted private network, or an authenticated HTTPS reverse proxy.
+The random URL is a bearer credential until the player exits.
+
+### iOS options
+
+| Option | Default | Purpose |
+|---|---:|---|
+| `--ios` | off | Select browser playback instead of file/stdout/local-device output. |
+| `--ios-bind <ADDR>` | `127.0.0.1:17820` | Remote address on which the temporary server listens. |
+| `--ios-url <ORIGIN>` | bind origin | Origin printed to the user; useful when the forwarded local port differs. |
+| `--ios-timeout <SECONDS>` | `300` | Link lifetime, from 1 to 86,400 seconds. |
+
+`--ios` conflicts with `--out`, `--stdout`, and `--play`. `--play-stdin` is a
+separate no-synthesis mode for desktop clients. In an interactive SSH
+terminal, a bare `speak "text"` now fails with guidance instead of silently
+attempting remote-device playback. Pass `--ios` for iOS/browser playback or
+`--play` explicitly when the remote machine's speakers are intentional.
 
 ## Streaming long documents
 
-Long inputs are not synthesized in one shot. `speak` splits the text into coherent chunks — sentences grouped up to ~240 characters, never cut mid-word, never split on decimals/clause references (`4.4`, `5.2.1`), abbreviations, or list markers — and synthesizes them one at a time. Because each chunk's audio is emitted as soon as it is ready, **playback and stdout streaming begin on the first chunk** instead of after the whole document. On a ~3.9-minute document this cuts time-to-first-audio from ~40 s to under 1 s; synthesis (several times faster than real time) then stays ahead of playback so it sounds gapless.
+Long inputs are split into coherent chunks rather than synthesized in one shot.
+Sentences are grouped to roughly 240 characters without cutting words, decimal
+references, common abbreviations, or list markers. Playback and stdout streaming
+start on the first synthesized chunk, while later chunks are generated ahead of
+the consumer.
 
-Markdown is normalized before synthesis: emphasis (`**`, `*`, `` ` ``), headings (`#`), horizontal rules, links, and bullets are reduced to their spoken text, while ordered-list numbers and sentence structure are preserved. Each chunk is a complete unit ending in punctuation, which matters because the model derives intonation from the chunk alone — there is no cross-chunk context. Pauses scale with the boundary: short between clauses, a beat between sentences, and a longer rest between paragraphs (tune the paragraph pause with `--gap SECONDS`, default `0.3`).
+Markdown emphasis, headings, rules, links, and bullet markers are reduced to
+spoken text. Ordered-list numbers and sentence structure are preserved. Pause
+length depends on whether a chunk ends a clause, sentence, or paragraph; tune the
+paragraph pause with `--gap`.
 
-When streaming a WAV to stdout, a header is written up front and PCM is flushed per chunk so a downstream player (`speak … --stdout | ffplay -`) hears audio as it arrives. Redirecting to a file (`speak … --stdout > out.wav`) seeks back and patches the real sizes into the header, producing a fully valid WAV; a true pipe gets the conventional streaming sentinel length.
+The `--ios` path deliberately uses a completed WAV rather than the unknown-length
+stdout stream because mobile media players commonly probe content length and
+request byte ranges before or during playback.
 
-Inspect the segmentation for any text without synthesizing it:
+## Device and performance
 
-```bash
-speak "$(cat long-document.md)" --dump-chunks
-```
+CPU is the default and recommended device. On Apple Silicon, Supertonic-3 already
+runs faster than real time. `--device auto` attempts the CoreML execution provider
+and falls back to CPU, but the current dynamic-shape graph is not accepted by
+CoreML, making the failed attempt slower than selecting CPU directly.
 
-## Device / GPU
+Local playback uses `cpal`: CoreAudio on macOS, ALSA on Linux, and WASAPI on
+Windows. Browser playback does not require an audio device on the remote host.
 
-The default is CPU, which on Apple Silicon already runs faster than real-time (about 7.5 s of audio in ~1.7 s). GPU support is built in but opt-in:
-
-```bash
-speak "…" --device auto -o out.wav   # try CoreML (GPU + Neural Engine), fall back to CPU
-```
-
-The full CoreML execution-provider path is wired up (`speak-core`'s `coreml` feature, on by default in the build), with automatic CPU fallback for unsupported ops or init failures. In practice, however, CoreML cannot build an execution plan for Supertonic-3's dynamic-shape, flow-matching graph (it errors with code -7), so `--device auto` falls back to CPU and ends up ~3.4x slower than plain CPU because of the failed attempt. CPU is therefore the recommended and default device for this model. `--device auto` remains useful if you swap in a CoreML-compatible model or a future ONNX Runtime improves dynamic-shape support. For a CPU-only, fully portable binary, install or build with `--no-default-features`.
-
-## SDK usage
+## SDK
 
 ```rust
 use speak_core::{Device, Engine, ModelLocator, SynthesisRequest};
 
-// Downloads the model on first use (requires the `download` feature):
-let mut engine = Engine::load_or_download(ModelLocator::from_cache(), Device::Cpu)?;
-// Or load strictly from a populated cache, never touching the network:
-//   let mut engine = Engine::load(ModelLocator::from_cache())?;
+let mut engine = Engine::load_or_download(
+    ModelLocator::from_cache(),
+    Device::Cpu,
+)?;
 
-let audio = engine.speak("F1", &SynthesisRequest::new("Hello.").speed(1.0).steps(12))?;
-audio.write_wav("hello.wav")?;          // file
-let wav_bytes = audio.to_wav_bytes()?;  // in-memory WAV (HTTP body, IPC, ...)
-let pcm = &audio.samples;               // raw mono f32 PCM
+let audio = engine.speak(
+    "F1",
+    &SynthesisRequest::new("Hello.").speed(1.0).steps(12),
+)?;
+
+audio.write_wav("hello.wav")?;
+let wav_bytes = audio.to_wav_bytes()?;
+let pcm = &audio.samples;
 ```
 
-`Engine::speak` returns the whole document at once. For long text, `Engine::speak_stream` synthesizes chunk by chunk and hands each chunk's audio to a callback the moment it is ready, so a consumer can start playing or sending audio while the rest is still being generated:
+For incremental consumers, `Engine::speak_stream` invokes a callback as soon as
+each chunk is synthesized:
 
 ```rust
 engine.speak_stream("F1", &SynthesisRequest::new(long_text), |chunk| {
-    // chunk.audio is this segment's PCM; chunk.gap_after is the silence (s) to
-    // play before the next chunk; chunk.index / chunk.total track progress.
     player.enqueue(&chunk.audio.samples);
-    Ok(())  // returning Err stops the stream early
+    Ok(())
 })?;
 ```
 
-`speak_core::plan_chunks(text, gap)` exposes the same segmentation without synthesizing, if you only need the chunk plan. `Engine::speak` takes `&mut self` (ONNX sessions are single-threaded). For a web server, put the engine behind a `Mutex` or keep a small pool and check one out per request. The `download` feature also exposes `speak_core::ensure_models(&locator)` if you want to pre-fetch without loading.
+`Engine` is mutable because its ONNX sessions are not shared concurrently. A
+server should place each engine behind a mutex or maintain a small engine pool.
 
-### Example downstream members (future)
+## Validation
 
-- **Tauri**: a `speak-tauri` member exposes a command that calls `engine.speak(...)` and returns `to_wav_bytes()` to the webview, or plays via the OS.
-- **Web server**: a `speak-web` member (axum/actix) holds a pooled `Engine` and serves `POST /tts` returning `audio/wav`.
-- **Read a webpage aloud**: a `speak-readability` member fetches a URL, extracts article text, splits it into requests, and feeds them to the same `Engine`. Only the text source is new; synthesis is unchanged.
+Run the default and portable configurations:
+
+```bash
+cargo clippy --workspace --all-targets -- -D warnings
+cargo test --workspace
+cargo clippy --workspace --all-targets --no-default-features -- -D warnings
+cargo test --workspace --no-default-features
+```
 
 ## Licensing
 
-`speak-core/src/helper.rs` is vendored from `supertone-inc/supertonic` (MIT-licensed sample code). The Supertonic-3 model weights are under the OpenRAIL-M license; review it before redistributing audio or models.
+`speak-core/src/helper.rs` is vendored from the MIT-licensed Supertonic example.
+Supertonic-3 model weights use the OpenRAIL-M license; review that license before
+redistributing models or generated audio.
