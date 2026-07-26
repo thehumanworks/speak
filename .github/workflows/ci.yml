@@ -1,0 +1,70 @@
+name: CI
+
+on:
+  pull_request:
+  push:
+    branches:
+      - main
+
+permissions:
+  contents: read
+
+jobs:
+  format:
+    name: Rust formatting
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt
+      - name: Check changed Rust files
+        run: rustfmt --edition 2021 --check --config skip_children=true src/main.rs src/ios.rs src/wavinput.rs
+
+  lint:
+    name: Clippy
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: clippy
+      - name: Install Linux audio dependencies
+        run: sudo apt-get update && sudo apt-get install -y libasound2-dev pkg-config
+      - name: Run Clippy
+        run: cargo clippy --workspace --all-targets --locked --no-default-features -- -D warnings
+
+  test:
+    name: Test ${{ matrix.os }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os:
+          - ubuntu-latest
+          - macos-latest
+          - windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: ci-${{ matrix.os }}
+      - name: Install Linux audio dependencies
+        if: runner.os == 'Linux'
+        run: sudo apt-get update && sudo apt-get install -y libasound2-dev pkg-config
+      - name: Run tests
+        shell: bash
+        run: |
+          set -o pipefail
+          cargo test --workspace --locked --no-default-features 2>&1 | tee test.log
+      - name: Upload failing test log
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: test-log-${{ matrix.os }}
+          path: test.log
+          if-no-files-found: warn

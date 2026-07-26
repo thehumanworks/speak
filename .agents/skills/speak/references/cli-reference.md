@@ -1,187 +1,212 @@
-# speak CLI reference
+# `speak` CLI reference
 
-Complete reference for the `speak` command. Read `SKILL.md` first for the common
-workflow; this file is the exhaustive lookup for flags, languages, output
-routing, and error behavior.
+Complete reference for the `speak` command. Read the parent `SKILL.md` first for
+the common workflow.
 
 ## Synopsis
 
-```
+```text
 speak [OPTIONS] [TEXT]
+speak --play-stdin [--verbose]
 ```
 
-The recommended way to run it without installing anything is `bunx
-@nothumanwork/speak [OPTIONS] [TEXT]` (or `npx -y @nothumanwork/speak …`). The
-examples in this file write just `speak` for brevity; substitute the `bunx`
-form unless the binary is already installed on `PATH`. See "Running without a
-local install" below.
+`TEXT` is spoken directly. When omitted in synthesis modes, `speak` reads UTF-8
+text from stdin. `--play-stdin` instead expects the canonical WAV stream emitted
+by `speak --stdout` and performs no synthesis.
 
-`TEXT` is the text to speak. If omitted, `speak` reads the text from standard
-input, so both of these work:
-
-```bash
-speak "Spoken from an argument."
-echo "Spoken from stdin." | speak --play
-speak --out doc.wav < document.txt
-```
-
-Leading and trailing whitespace is trimmed. Empty input (no argument and empty
-stdin) is an error.
-
-## Flags
+## Destination flags
 
 | Flag | Default | Meaning |
-|------|---------|---------|
-| `-v, --voice <VOICE>` | `M1` | Built-in voice id (`M1`–`M5` male, `F1`–`F5` female, case-insensitive) or a path to a custom voice-style JSON file. |
-| `-o, --out <PATH>` | — | Write a 16-bit PCM WAV file to `PATH`. Always takes precedence over `--stdout`. Combine with `--play` to also play aloud. |
-| `--stdout` | off | Stream WAV bytes to stdout, even on a terminal. Ignored when `--out` is set. |
-| `--play` | off | Play the audio aloud, forcing playback even when stdout is captured (the agent/pipe case). Can be combined with `--out` or `--stdout` to play *and* save/stream. |
-| `-l, --lang <LANG>` | `en` | Language code (see list below). Use `na` for unknown text. |
-| `-s, --steps <N>` | `8` | Denoising steps; higher is better quality but slower. |
-| `--speed <FACTOR>` | `1.05` | Speech speed factor; `0.9`–`1.5` is the useful range. |
-| `--gap <SECONDS>` | `0.3` | Pause between paragraphs; inter-sentence and inter-clause pauses scale down from it. |
-| `--device <cpu\|auto>` | `cpu` | `cpu` forces CPU. `auto` tries GPU/CoreML with CPU fallback (currently falls back to CPU for this model, so it is slower). |
-| `--model-dir <PATH>` | `$SUPERTONIC_CACHE_DIR` or `~/.cache/supertonic3` | Model base directory containing `onnx/` and `voice_styles/`. |
-| `--no-download` | off | Do not download missing model files; fail if the cache is incomplete. |
-| `--list-voices` | — | Print the built-in voices and exit (no synthesis). |
-| `--dump-chunks` | — | Print how the text would be split into streaming chunks (index, char count, trailing gap, text) and exit, without loading the model. |
-| `--verbose` | off | Print extra diagnostics to stderr (inference backend, time-to-first-audio). |
-| `--version` | — | Print the version and exit. |
-| `-h, --help` | — | Print help and exit. |
+|---|---:|---|
+| `-o, --out <PATH>` | — | Write a complete 16-bit PCM WAV. Combine with `--play` to save and play locally. |
+| `--stdout` | off | Stream WAV bytes to stdout, flushing each synthesized chunk. Combine with `--play` to also play locally. |
+| `--play` | off | Play through the default output device on the machine running `speak`. Over SSH, that is the remote host. |
+| `--play-stdin` | off | Incrementally validate and play the canonical mono PCM16 WAV received on stdin. Does not load the model. |
+| `--ios` | off | Serve a short-lived browser player for an iPhone/iPad SSH client. Private SSH networks route directly; other sessions use the loopback tunnel. Conflicts with `--out`, `--stdout`, and `--play`. |
+| `--ios-bind <ADDR>` | automatic | Override the remote listen address selected by `--ios`; requires `--ios`. |
+| `--ios-url <ORIGIN>` | bind origin | Origin printed in the one-time URL. It must be `http://` or `https://` with no path, query, fragment, or whitespace. |
+| `--ios-timeout <SECONDS>` | `300` | Browser-link lifetime. Valid range: 1–86,400; requires `--ios`. |
 
-## Output routing (where the audio goes)
+### Automatic destination routing
 
-`speak` chooses a single destination from `--out`, `--stdout`, `--play`, and
-whether stdout is a real terminal. The precedence is:
+Destination precedence is:
 
-1. `--out PATH` is set → **write the WAV file** (wins over everything). If
-   `--play` is also set, play aloud while writing.
-2. Otherwise `--stdout` is set → **stream WAV bytes to stdout** (even on a
-   terminal). If `--play` is also set, play aloud while streaming.
-3. Otherwise `--play` is set → **play aloud**, even when stdout is captured.
-4. Otherwise, no destination flag:
-   - stdout is **not** a terminal (a pipe or captured by an agent) → **stream
-     WAV bytes to stdout**.
-   - stdout **is** a terminal → **play aloud**.
+1. `--play-stdin` → consume WAV stdin; no model load.
+2. `--out PATH` → file; `--play` adds local playback.
+3. `--ios` → temporary browser player.
+4. `--stdout` → WAV stdout; `--play` adds local playback.
+5. `--play` → local/default audio device.
+6. No destination and stdout is not a terminal → WAV stdout.
+7. No destination in an interactive SSH terminal → actionable error.
+8. No destination in a local terminal → local/default audio device.
 
-The practical takeaways:
+Output is mode-specific. `--stdout` writes only WAV bytes to stdout, while
+`--ios` writes only the tappable playback URL. Status, progress, diagnostics,
+paths, and warnings use stderr.
 
-- **stdout is audio; stderr is everything else.** Status, progress, and the
-  "Saved N.NNs of audio to …" line all go to stderr, so capturing stdout yields a
-  clean WAV.
-- **From an agent, always pass an explicit destination** (`--play`, `--out`, or
-  `--stdout`). The bare default in a captured-stdout context streams raw bytes,
-  which is rarely what you want when the intent was to play audio.
-- Streaming to stdout writes a WAV header up front and flushes PCM per chunk, so
-  a downstream player hears audio as it arrives. Redirecting that stream to a
-  file (`speak … --stdout > out.wav`) seeks back and patches the real sizes into
-  the header, producing a fully valid WAV; a true pipe gets the conventional
-  streaming sentinel length.
+## Desktop SSH playback
+
+```bash
+printf '%s' 'Remote synthesis.' \
+  | ssh -T user@host 'speak --stdout' \
+  | speak --play-stdin
+```
+
+The local player accepts complete or unknown-length canonical WAV headers and
+streams samples to the local audio device. Use a non-PTY SSH execution channel.
+
+## iPhone/iPad SSH playback
+
+SSH terminal channels cannot redirect the remote host's audio device into an iOS
+SSH application. Run `speak --ios "Hello on iOS."` first. When both addresses in
+`SSH_CONNECTION` are on a private LAN, VPN, tailnet (RFC 6598), or IPv6 ULA,
+`speak` binds the observed private SSH host address on an available port and
+prints a directly reachable one-time URL. No client setup is needed.
+
+`speak` reports the SSH client IP address. It also reports the client application
+when the client provides a specific `TERM_PROGRAM`, `LC_TERMINAL`, or distinctive
+`TERM` value; standard SSH has no reliable client-application identity field.
+
+For public, NATed, or proxied SSH connections, automatic public HTTP exposure
+would leak audio in plaintext. `--ios` therefore stays on loopback and prints a
+`127.0.0.1:17820` URL. Configure the iOS SSH client with:
+
+```text
+local  127.0.0.1:17820
+remote 127.0.0.1:17820
+```
+
+OpenSSH equivalent:
+
+```bash
+ssh -L 17820:127.0.0.1:17820 user@host
+```
+
+Tap the printed `http://127.0.0.1:17820/<random-token>` URL. The endpoint:
+
+- binds to loopback in tunnel mode;
+- uses a random 128-bit bearer path;
+- serves a complete WAV with `HEAD` and single-byte-range support;
+- sets no-store and browser hardening headers;
+- exposes no directory or file-system content; and
+- exits after playback/fetch or the configured timeout.
+
+Safari can reject audible autoplay; the page always exposes native playback
+controls. Keep the SSH tunnel active while the browser fetches audio.
+The remote `speak` process cannot create this forward itself: local forwarding
+is owned by the SSH client/transport, not the remote shell channel.
+
+When the iOS local port differs from the remote port:
+
+```bash
+# Client forward: local 8080 -> remote 127.0.0.1:17820
+speak --ios --ios-url http://127.0.0.1:8080 "Hello."
+```
+
+Automatic private-network routing avoids tunnel suspension when the SSH
+addresses are directly reachable. If detection is unavailable, the same route
+can be selected explicitly:
+
+```bash
+speak --ios \
+  --ios-bind 0.0.0.0:17820 \
+  --ios-url http://100.64.0.10:17820 \
+  "Hello privately."
+```
+
+Do not expose the plain-HTTP listener directly to the public internet. Use the
+SSH tunnel, a private network, or an authenticated HTTPS reverse proxy.
+
+## Synthesis flags
+
+| Flag | Default | Meaning |
+|---|---:|---|
+| `-v, --voice <VOICE>` | `M1` | `M1`–`M5`, `F1`–`F5`, case-insensitive, or a custom voice-style JSON path. |
+| `-l, --lang <LANG>` | `en` | Language code. Use `na` for unknown/mixed input. |
+| `-s, --steps <N>` | `8` | Denoising steps; higher can improve quality at greater latency. |
+| `--speed <FACTOR>` | `1.05` | Speech speed; approximately `0.9`–`1.5` is useful. |
+| `--gap <SECONDS>` | `0.3` | Paragraph pause; sentence/clause pauses scale from it. |
+| `--device <cpu\|auto>` | `cpu` | CPU, or CoreML attempt with CPU fallback on supported builds. |
+| `--model-dir <PATH>` | cache | Base directory containing `onnx/` and `voice_styles/`. |
+| `--no-download` | off | Fail when required assets are absent instead of downloading them. |
+| `--list-voices` | — | Print built-in voices and exit without loading models. |
+| `--dump-chunks` | — | Print normalized long-text chunks and exit without synthesis. |
+| `--verbose` | off | Print backend and timing diagnostics to stderr. |
+| `--version` | — | Print the binary version. |
+| `-h, --help` | — | Print help. |
 
 ## Supported languages
 
-`--lang` accepts these codes:
-
-```
+```text
 en  ko  ja  ar  bg  cs  da  de  el  es  et  fi  fr  hi  hr  hu  id  it
 lt  lv  nl  pl  pt  ro  ru  sk  sl  sv  tr  uk  vi  na
 ```
 
-`na` means "not applicable / unknown" — use it when the language of the text is
-unknown. An unsupported code is an error that lists the valid codes.
-
 ## Voices
 
-Ten built-in voices, all present once the model cache is populated:
-
-```
-M1 M2 M3 M4 M5   (male)
-F1 F2 F3 F4 F5   (female)
+```text
+M1 M2 M3 M4 M5
+F1 F2 F3 F4 F5
 ```
 
-Ids are case-insensitive (`f1` resolves to `F1`). Any `--voice` value that is not
-a built-in id is treated as a filesystem path to a custom voice-style JSON file;
-if neither a built-in id nor an existing file matches, `speak` errors. There is
-no emotion parameter — vary delivery via voice choice, `--speed`, and `--steps`.
+The voices represent different timbres/deliveries, not explicit emotions.
+Adjust voice, speed, and steps to shape delivery.
 
-## Models and the cache
+## Model cache
 
-The cache layout under the base directory is:
+Resolution order:
 
-```
+1. `--model-dir <PATH>`
+2. `SUPERTONIC_CACHE_DIR`
+3. `~/.cache/supertonic3`
+
+Expected layout:
+
+```text
 <base>/
   onnx/{duration_predictor,text_encoder,vector_estimator,vocoder}.onnx
   onnx/{tts.json,unicode_indexer.json}
   voice_styles/{M1..M5,F1..F5}.json
 ```
 
-The base directory is resolved as: `--model-dir` if given, else
-`$SUPERTONIC_CACHE_DIR` if set, else `~/.cache/supertonic3`. On first run (with
-downloading enabled, the default) missing files are fetched from the
-`Supertone/supertonic-3` Hugging Face repository, pinned to an immutable commit
-so every machine gets byte-identical weights. Only missing files are fetched,
-each is written atomically, and concurrent first runs are serialized by a lock
-file. With `--no-download`, missing model files cause an error that names which
-of the required `onnx/` files are absent (a missing `voice_styles/*.json` is not
-checked at load time — it instead errors when that voice is requested); populate
-the directory yourself (for example,
-`git clone https://huggingface.co/Supertone/supertonic-3` into it) for offline
-use.
+With the `download` feature, missing assets are fetched from a pinned immutable
+Hugging Face revision. Files are written atomically, and concurrent downloads
+are serialized. `--no-download` turns missing required ONNX assets into an error.
 
-## Error and exit behavior
+## Long-text behavior
 
-- Exits non-zero with a message on stderr for: empty input, an input that
-  normalizes to nothing speakable (only markup/code/punctuation), an unsupported
-  `--lang`, an unknown `--voice`, a missing model cache under `--no-download`, or
-  no available audio output device when playback was requested.
-- `--list-voices`, `--dump-chunks`, `--version`, and `--help` all exit `0`
-  without synthesizing.
+Long input is normalized and split into coherent chunks. Playback and stdout
+streaming start with the first chunk. `--ios` instead synthesizes a complete WAV
+because iOS media consumers commonly need a known content length and byte-range
+access.
 
-## Running without a local install (npm / Bun)
+## Errors and exit behavior
 
-The package `@nothumanwork/speak` is published on the npm registry, so the
-preferred install-free invocation is through the registry (it fetches a prebuilt
-`speak` binary, or builds from source if no release matches the platform, and
-caches it):
+Non-zero exits include:
 
-```bash
-# recommended: registry package via Bun
-bunx @nothumanwork/speak --list-voices
+- empty or non-speakable input;
+- unsupported language or voice;
+- missing model files with downloads disabled;
+- unavailable local audio device when local playback was requested;
+- interactive SSH with no explicit destination;
+- invalid/conflicting iOS options;
+- inability to bind or serve the temporary browser endpoint;
+- malformed, truncated, or unsupported WAV passed to `--play-stdin`; and
+- audio output/stream failures.
 
-# npm-only equivalent
-npx -y @nothumanwork/speak --list-voices
-```
+The temporary iOS endpoint expiring normally is reported on stderr and exits
+successfully; it is a bounded hand-off, not a daemon.
 
-Avoid the GitHub-tarball form `bunx github:thehumanworks/speak`: Bun uses an
-unauthenticated tarball API that returns 404 because the repository is private.
-`npx -y github:thehumanworks/speak` does work (npm clones over git with your
-credentials) but is not needed now that the registry package exists. Fast release
-downloads (used by the postinstall) need `GITHUB_TOKEN` / `SPEAK_GITHUB_TOKEN`
-(with `contents:read`) or a signed-in `gh`. Overrides: `SPEAK_VERSION=v0.1.0`
-pins a tag, `SPEAK_REPO=owner/repo` selects another repository,
-`SPEAK_NPM_SKIP_DOWNLOAD=1` skips the postinstall.
-
-## Worked examples
+## Examples
 
 ```bash
-# Speak a status update aloud to the user
 speak "Tests passed: 142 of 142." --play
-
-# Save a greeting in a female voice at higher quality
 speak "Welcome back." --voice F3 --steps 16 --out greeting.wav
-
-# Narrate a markdown document, slower, with longer paragraph pauses
 speak "$(cat report.md)" --voice F1 --speed 0.97 --gap 0.5 --play
-
-# Pipe live audio into a player
-speak "Streaming straight to a player." --stdout | ffplay -autoexit -nodisp -
-
-# Inspect segmentation only (no model load, no audio)
+speak "Streaming." --stdout | ffplay -autoexit -nodisp -
+printf '%s' 'Remote.' | ssh -T host 'speak --stdout' | speak --play-stdin
+speak "Remote synthesis, iOS playback." --ios
 speak "$(cat report.md)" --dump-chunks
-
-# Offline: fail loudly if the cache is incomplete instead of downloading
 speak "Offline test." --no-download --out out.wav
-
-# Diagnostics: show the backend and time-to-first-audio
 speak "Diagnostics." --play --verbose
 ```
