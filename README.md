@@ -165,12 +165,33 @@ printf '%s' 'Remote audio.' \
 
 SSH terminal channels do not carry an audio-device abstraction. Running
 `--play` in an SSH shell therefore targets the **remote host's** sound device,
-not the iPhone or iPad. `--ios` uses the generic mechanism available to
-third-party SSH clients: an SSH local forward plus a short-lived browser player.
+not the iPhone or iPad. `--ios` creates a short-lived browser player and chooses
+the safest reachable route available.
 
-### 1. Configure a local forward in the iOS SSH client
+Run in the remote shell:
 
-Forward this address on the iPhone or iPad:
+```bash
+speak --ios "This audio was synthesized remotely and is playing on iOS."
+```
+
+`speak` inspects the standard `SSH_CONNECTION` addresses:
+
+- When both the client and host use private LAN, VPN, RFC 6598 (including
+  Tailscale), or IPv6 ULA addresses, it binds the exact private host address on
+  an available port. Tap the printed URL directly; no forwarding setup is
+  needed.
+- For a public, NATed, or proxied SSH connection, it stays on remote loopback
+  and prints a `http://127.0.0.1:17820/...` URL. Configure the client-side local
+  forward below, then run `speak --ios` again.
+
+The command reports the SSH client IP address. It also reports a client
+application name when the client supplies a specific `TERM_PROGRAM`,
+`LC_TERMINAL`, or distinctive `TERM` value. Standard SSH does not expose a
+reliable client-application identity, so generic clients remain unnamed.
+
+### Public or proxied SSH: configure a local forward
+
+Forward this address in the iPhone or iPad SSH client:
 
 ```text
 local  127.0.0.1:17820
@@ -185,20 +206,17 @@ ssh -L 17820:127.0.0.1:17820 user@host
 
 Keep the SSH connection and forward active while listening.
 
-### 2. Generate audio in the remote shell
+The remote command cannot add this forward automatically. Local forwarding is
+owned by the SSH client/transport, and the remote shell only has its session
+channel. Once configured, the forward can remain part of the saved SSH host.
 
-```bash
-speak --ios "This audio was synthesized remotely and is playing on iOS."
-```
+For either route, `speak`:
 
-`speak` will:
-
-1. bind only to remote loopback by default;
-2. synthesize a complete, seekable WAV;
-3. create a random 128-bit bearer path;
-4. print only a URL such as `http://127.0.0.1:17820/<token>` to stdout;
-5. serve an iOS-compatible player with byte-range support; and
-6. shut down after the audio is fetched/played or after five minutes.
+1. synthesizes a complete, seekable WAV;
+2. creates a random 128-bit bearer path;
+3. prints only the one-time URL to stdout;
+4. serves an iOS-compatible player with byte-range support; and
+5. shuts down after the audio is fetched/played or after five minutes.
 
 Tap the printed URL. Safari may require one tap on the Play control because iOS
 can block audible autoplay.
@@ -217,11 +235,10 @@ remote 127.0.0.1:17820
 speak --ios --ios-url http://127.0.0.1:8080 "Hello."
 ```
 
-### Trusted private-network access
+### Explicit private-network route
 
-Some iOS clients suspend their SSH tunnel when an external browser is opened.
-Prefer an in-app browser or split view where available. On a trusted private
-network or tailnet, the player can instead listen on a reachable interface:
+Private SSH connections are detected automatically. When metadata is unavailable
+or an HTTPS proxy supplies the public URL, override the route explicitly:
 
 ```bash
 speak --ios \
@@ -238,8 +255,8 @@ The random URL is a bearer credential until the player exits.
 
 | Option | Default | Purpose |
 |---|---:|---|
-| `--ios` | off | Select browser playback instead of file/stdout/local-device output. |
-| `--ios-bind <ADDR>` | `127.0.0.1:17820` | Remote address on which the temporary server listens. |
+| `--ios` | off | Select browser playback and automatically choose private-direct or loopback-tunnel routing. |
+| `--ios-bind <ADDR>` | automatic | Override the remote address on which the temporary server listens. |
 | `--ios-url <ORIGIN>` | bind origin | Origin printed to the user; useful when the forwarded local port differs. |
 | `--ios-timeout <SECONDS>` | `300` | Link lifetime, from 1 to 86,400 seconds. |
 

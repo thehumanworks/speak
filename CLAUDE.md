@@ -19,7 +19,7 @@ Transport/front-end code must depend on `speak-core`; it must not duplicate or r
 
 - **stdout is protocol output, selected by mode.** In `--stdout` mode it contains only WAV bytes. In `--ios` mode it contains only the tappable playback URL. All status, progress, warnings, and diagnostics use stderr. A stray `println!` on the WAV path corrupts callers.
 - **`--play` means the machine executing `speak`.** It never implies SSH audio forwarding. A PTY-backed SSH session without an explicit destination must remain an actionable error.
-- **The iOS server is private by default.** Keep the default listener on loopback, retain the random bearer path, no-store headers, strict URL validation, range support, bounded request parsing, and expiry. Public plain HTTP exposure must never be the recommended path.
+- **The iOS server is private by default.** Automatic direct playback is allowed only when both addresses in `SSH_CONNECTION` are private/LAN, RFC 6598 (including Tailscale), or IPv6 ULA addresses. Public/proxied SSH sessions stay on loopback and require a client-created local forward. Retain the random bearer path, no-store headers, strict URL validation, range support, bounded request parsing, and expiry. Public plain HTTP exposure must never be the automatic or recommended path.
 - **Do not edit or reformat `speak-core/src/helper.rs`.** It is vendored from `supertone-inc/supertonic` and exempted through `#[allow(dead_code, clippy::all)]` in `lib.rs`.
 - **The `_exit(0)` shutdown in `clean_exit` is deliberate.** It bypasses an ONNX Runtime destructor crash seen on macOS.
 - **Do not casually bump `ort`/`ort-sys`.** Their exact versions match the vendored helper API and binary-download setup.

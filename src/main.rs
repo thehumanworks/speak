@@ -8,7 +8,7 @@
 //! playback URL for `--ios`; status and diagnostics go to standard error.
 
 use std::io::{IsTerminal, Read, Write};
-use std::net::SocketAddr;
+use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 use std::path::PathBuf;
 use std::time::{Duration, Instant};
 
@@ -27,6 +27,28 @@ use player::StreamingPlayer;
 const DEFAULT_IOS_BIND: &str = "127.0.0.1:17820";
 const DEFAULT_IOS_TIMEOUT_SECS: u64 = 300;
 const MAX_IOS_TIMEOUT_SECS: u64 = 86_400;
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct SshConnection {
+    client_ip: IpAddr,
+    server_ip: IpAddr,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum IosRouteKind {
+    Local,
+    Tunnel,
+    PrivateDirect,
+    Explicit,
+}
+
+#[derive(Debug, PartialEq, Eq)]
+struct IosRoute {
+    bind_addr: SocketAddr,
+    public_base_url: Option<String>,
+    ssh_connection: Option<SshConnection>,
+    kind: IosRouteKind,
+}
 
 #[derive(Clone, Copy, Debug, ValueEnum)]
 enum DeviceArg {
@@ -83,12 +105,12 @@ struct Args {
     play_stdin: bool,
 
     /// Serve a short-lived browser player for an iPhone or iPad SSH client.
-    /// Configure an SSH local forward to the bind address, then tap the URL.
+    /// Private SSH networks work directly; public SSH requires a local forward.
     #[arg(long, conflicts_with_all = ["out", "stdout", "play"])]
     ios: bool,
 
-    /// Address for --ios to listen on. Defaults to 127.0.0.1:17820. Keep this
-    /// on loopback when using an SSH tunnel.
+    /// Override the address selected by --ios. Without this option, private SSH
+    /// networks use the observed host address and other sessions use loopback.
     #[arg(long, value_name = "ADDR", requires = "ios")]
     ios_bind: Option<SocketAddr>,
 
@@ -190,10 +212,145 @@ fn choose_sink(
     }
     if interactive_ssh {
         bail!(
-            "interactive SSH session detected: SSH cannot route the remote audio device to this client. For iPhone/iPad, configure a local forward to {DEFAULT_IOS_BIND} and run with --ios; pass --play only to use the remote host's speakers"
+            "interactive SSH session detected: SSH cannot route the remote audio device to this client. For iPhone/iPad, run with --ios; private SSH networks work directly and public SSH uses a local forward to {DEFAULT_IOS_BIND}. Pass --play only to use the remote host's speakers"
         );
     }
     Ok(Sink::Play)
+}
+
+/// Parse the standard `SSH_CONNECTION` value:
+/// `<client-ip> <client-port> <server-ip> <server-port>`.
+fn parse_ssh_connection(value: &str) -> Option<SshConnection> {
+    let mut fields = value.split_whitespace();
+    let client_ip = fields.next()?.parse().ok()?;
+    fields.next()?.parse::<u16>().ok()?;
+    let server_ip = fields.next()?.parse().ok()?;
+    fields.next()?.parse::<u16>().ok()?;
+    if fields.next().is_some() {
+        return None;
+    }
+    Some(SshConnection {
+        client_ip,
+        server_ip,
+    })
+}
+
+/// Private/LAN and tailnet addresses can safely support a direct, tokenized
+/// playback URL. Public addresses stay on loopback so `--ios` never exposes
+/// plaintext audio to the internet by default.
+fn is_private_route_address(address: IpAddr) -> bool {
+    match address {
+        IpAddr::V4(address) => address.is_private() || is_shared_address_space(address),
+        IpAddr::V6(address) => (address.segments()[0] & 0xfe00) == 0xfc00,
+    }
+}
+
+/// RFC 6598 shared address space. Tailscale uses this range for IPv4 tailnet
+/// addresses, but it is not included in `Ipv4Addr::is_private`.
+fn is_shared_address_space(address: Ipv4Addr) -> bool {
+    let octets = address.octets();
+    octets[0] == 100 && (64..=127).contains(&octets[1])
+}
+
+/// Select a no-configuration direct route only when both observed SSH endpoints
+/// are private. Requiring both sides avoids advertising a server-private address
+/// to a public client connected through NAT or a proxy.
+fn choose_ios_route(
+    explicit_bind: Option<SocketAddr>,
+    explicit_url: Option<String>,
+    ssh_connection: Option<SshConnection>,
+) -> IosRoute {
+    let has_explicit_networking = explicit_bind.is_some() || explicit_url.is_some();
+    if has_explicit_networking {
+        return IosRoute {
+            bind_addr: explicit_bind.unwrap_or_else(|| {
+                DEFAULT_IOS_BIND
+                    .parse()
+                    .expect("the built-in iOS bind address must be valid")
+            }),
+            public_base_url: explicit_url,
+            ssh_connection,
+            kind: IosRouteKind::Explicit,
+        };
+    }
+
+    if let Some(connection) = ssh_connection {
+        if is_private_route_address(connection.client_ip)
+            && is_private_route_address(connection.server_ip)
+        {
+            return IosRoute {
+                // The URL contains the actual ephemeral port selected by the OS.
+                // This avoids both port conflicts and one-time client setup.
+                bind_addr: SocketAddr::new(connection.server_ip, 0),
+                public_base_url: None,
+                ssh_connection: Some(connection),
+                kind: IosRouteKind::PrivateDirect,
+            };
+        }
+    }
+
+    IosRoute {
+        bind_addr: DEFAULT_IOS_BIND
+            .parse()
+            .expect("the built-in iOS bind address must be valid"),
+        public_base_url: None,
+        ssh_connection,
+        kind: if ssh_connection.is_some() {
+            IosRouteKind::Tunnel
+        } else {
+            IosRouteKind::Local
+        },
+    }
+}
+
+fn sanitize_client_name(value: &str) -> Option<String> {
+    let value = value.trim();
+    if value.is_empty()
+        || value.len() > 64
+        || !value.chars().all(|character| {
+            character.is_ascii_alphanumeric()
+                || matches!(character, ' ' | '.' | '_' | '+' | '-' | '(' | ')' | '/')
+        })
+    {
+        return None;
+    }
+    Some(value.to_string())
+}
+
+/// SSH has no standard client-application identity field. Some clients forward
+/// a specific terminal-program hint, and a few use a distinctive `TERM` value.
+fn detect_ssh_client_name(
+    term_program: Option<&str>,
+    lc_terminal: Option<&str>,
+    term: Option<&str>,
+) -> Option<String> {
+    if let Some(name) = term_program.and_then(sanitize_client_name) {
+        return Some(name);
+    }
+    if let Some(name) = lc_terminal.and_then(sanitize_client_name) {
+        return Some(name);
+    }
+
+    let term = term?.to_ascii_lowercase();
+    [
+        ("blink", "Blink"),
+        ("termius", "Termius"),
+        ("xterm-kitty", "kitty"),
+        ("wezterm", "WezTerm"),
+    ]
+    .into_iter()
+    .find_map(|(needle, name)| term.contains(needle).then(|| name.to_string()))
+}
+
+fn ssh_client_name_from_environment() -> Option<String> {
+    let term_program = std::env::var("TERM_PROGRAM").ok();
+    let lc_terminal = std::env::var("LC_TERMINAL").ok();
+    let term = std::env::var("TERM").ok();
+    detect_ssh_client_name(
+        term_program.as_deref(),
+        lc_terminal.as_deref(),
+        term.as_deref(),
+    )
 }
 
 /// Load the engine, auto-downloading missing model files unless the user opted
@@ -268,22 +425,34 @@ fn main() -> Result<()> {
         std::env::var_os("SSH_TTY").is_some(),
     )?;
 
-    let ios_server = if sink == Sink::Ios {
-        let bind_addr = match args.ios_bind {
-            Some(addr) => addr,
-            None => DEFAULT_IOS_BIND
-                .parse()
-                .expect("the built-in iOS bind address must be valid"),
-        };
+    let ssh_connection = std::env::var("SSH_CONNECTION")
+        .ok()
+        .and_then(|value| parse_ssh_connection(&value));
+    let mut ios_route = (sink == Sink::Ios)
+        .then(|| choose_ios_route(args.ios_bind, args.ios_url.clone(), ssh_connection));
+    let ios_server = if let Some(route) = &mut ios_route {
         let timeout_secs = args.ios_timeout.unwrap_or(DEFAULT_IOS_TIMEOUT_SECS);
         if timeout_secs == 0 || timeout_secs > MAX_IOS_TIMEOUT_SECS {
             bail!("--ios-timeout must be between 1 and {MAX_IOS_TIMEOUT_SECS} seconds");
         }
-        Some(IosPlaybackServer::bind(
-            bind_addr,
-            args.ios_url.as_deref(),
-            Duration::from_secs(timeout_secs),
-        )?)
+        let timeout = Duration::from_secs(timeout_secs);
+        let server =
+            IosPlaybackServer::bind(route.bind_addr, route.public_base_url.as_deref(), timeout);
+        Some(match server {
+            Ok(server) => server,
+            Err(error) if route.kind == IosRouteKind::PrivateDirect => {
+                eprintln!(
+                    "Could not bind the detected private SSH host address: {error:#}. Falling back to the loopback tunnel."
+                );
+                route.bind_addr = DEFAULT_IOS_BIND
+                    .parse()
+                    .expect("the built-in iOS bind address must be valid");
+                route.kind = IosRouteKind::Tunnel;
+                IosPlaybackServer::bind(route.bind_addr, None, timeout)
+                    .context("could not bind the fallback iOS loopback tunnel")?
+            }
+            Err(error) => return Err(error),
+        })
     } else {
         None
     };
@@ -341,7 +510,18 @@ fn main() -> Result<()> {
         }
         Sink::Ios => {
             let server = ios_server.expect("the iOS sink must have a bound server");
-            synthesize_for_ios(&mut engine, &args.voice, &request, server, args.verbose)?;
+            let route = ios_route
+                .as_ref()
+                .expect("the iOS sink must have a selected network route");
+            synthesize_for_ios(
+                &mut engine,
+                &args.voice,
+                &request,
+                server,
+                route,
+                ssh_client_name_from_environment().as_deref(),
+                args.verbose,
+            )?;
         }
     }
 
@@ -356,6 +536,8 @@ fn synthesize_for_ios(
     voice: &str,
     request: &SynthesisRequest,
     server: IosPlaybackServer,
+    route: &IosRoute,
+    ssh_client_name: Option<&str>,
     verbose: bool,
 ) -> Result<()> {
     let started = Instant::now();
@@ -378,10 +560,8 @@ fn synthesize_for_ios(
     // text remains on stderr, and terminals generally make the raw URL tappable.
     println!("{}", server.url());
     std::io::stdout().flush().ok();
-    eprintln!(
-        "Audio ready. Keep the SSH client's local forward to remote {} active, then open the URL above on the iPhone/iPad. If autoplay is blocked, tap Play.",
-        server.bind_addr()
-    );
+    report_ios_route(route, server.bind_addr(), ssh_client_name);
+    eprintln!("If autoplay is blocked, tap Play.");
     if !server.bind_addr().ip().is_loopback() && server.url().starts_with("http://") {
         eprintln!(
             "Warning: the playback URL uses unencrypted HTTP on a non-loopback address. Use only on a trusted private network, or put the endpoint behind HTTPS."
@@ -389,6 +569,41 @@ fn synthesize_for_ios(
     }
 
     server.serve(&wav)
+}
+
+fn report_ios_route(route: &IosRoute, actual_bind: SocketAddr, ssh_client_name: Option<&str>) {
+    if let Some(connection) = route.ssh_connection {
+        match ssh_client_name {
+            Some(name) => {
+                eprintln!("Detected SSH client {name} at {}.", connection.client_ip);
+            }
+            None => {
+                eprintln!(
+                    "Detected SSH client address {}; standard SSH did not expose the client application name.",
+                    connection.client_ip
+                );
+            }
+        }
+    }
+
+    match route.kind {
+        IosRouteKind::PrivateDirect => {
+            eprintln!(
+                "Audio ready on private SSH host address {actual_bind}; open the URL above directly. No port forward is needed."
+            );
+        }
+        IosRouteKind::Tunnel => {
+            eprintln!(
+                "Audio ready on {actual_bind}. Open the URL above through a client-side local forward to remote {actual_bind}. Standard SSH does not let a remote command create that forward."
+            );
+        }
+        IosRouteKind::Explicit => {
+            eprintln!("Audio ready using the requested iOS network settings; open the URL above.");
+        }
+        IosRouteKind::Local => {
+            eprintln!("Audio ready on {actual_bind}; open the URL above on this device.");
+        }
+    }
 }
 
 /// Synthesize chunk by chunk and play each chunk as soon as it is ready, so the
@@ -607,5 +822,117 @@ mod tests {
         assert!(message.contains("interactive SSH session detected"));
         assert!(message.contains("--ios"));
         assert!(message.contains("--play"));
+    }
+
+    #[test]
+    fn parses_standard_ssh_connection_metadata() {
+        assert_eq!(
+            parse_ssh_connection("100.101.102.103 54321 100.91.92.93 22"),
+            Some(SshConnection {
+                client_ip: "100.101.102.103".parse().unwrap(),
+                server_ip: "100.91.92.93".parse().unwrap(),
+            })
+        );
+        assert_eq!(
+            parse_ssh_connection("fd7a:115c:a1e0::1 54321 fd7a:115c:a1e0::2 22"),
+            Some(SshConnection {
+                client_ip: "fd7a:115c:a1e0::1".parse().unwrap(),
+                server_ip: "fd7a:115c:a1e0::2".parse().unwrap(),
+            })
+        );
+        assert_eq!(parse_ssh_connection("not a connection"), None);
+        assert_eq!(
+            parse_ssh_connection("100.64.0.1 1234 100.64.0.2 22 extra"),
+            None
+        );
+    }
+
+    #[test]
+    fn ios_uses_private_ssh_address_without_a_tunnel() {
+        let connection = SshConnection {
+            client_ip: "100.101.102.103".parse().unwrap(),
+            server_ip: "100.91.92.93".parse().unwrap(),
+        };
+        let route = choose_ios_route(None, None, Some(connection));
+
+        assert_eq!(route.bind_addr, "100.91.92.93:0".parse().unwrap());
+        assert_eq!(route.kind, IosRouteKind::PrivateDirect);
+        assert_eq!(route.ssh_connection, Some(connection));
+    }
+
+    #[test]
+    fn private_route_detection_covers_lan_tailnet_and_ipv6_ula() {
+        for address in [
+            "10.0.0.8",
+            "172.16.2.3",
+            "192.168.1.20",
+            "100.64.0.1",
+            "100.127.255.254",
+            "fd7a:115c:a1e0::1",
+        ] {
+            assert!(
+                is_private_route_address(address.parse().unwrap()),
+                "{address} should support private direct playback"
+            );
+        }
+        for address in ["127.0.0.1", "100.128.0.1", "203.0.113.20", "::1"] {
+            assert!(
+                !is_private_route_address(address.parse().unwrap()),
+                "{address} should not select private direct playback"
+            );
+        }
+    }
+
+    #[test]
+    fn ios_keeps_public_ssh_sessions_on_the_loopback_tunnel() {
+        let connection = SshConnection {
+            client_ip: "198.51.100.40".parse().unwrap(),
+            server_ip: "203.0.113.20".parse().unwrap(),
+        };
+        let route = choose_ios_route(None, None, Some(connection));
+
+        assert_eq!(route.bind_addr, DEFAULT_IOS_BIND.parse().unwrap());
+        assert_eq!(route.kind, IosRouteKind::Tunnel);
+    }
+
+    #[test]
+    fn explicit_ios_network_options_disable_auto_routing() {
+        let connection = SshConnection {
+            client_ip: "100.101.102.103".parse().unwrap(),
+            server_ip: "100.91.92.93".parse().unwrap(),
+        };
+        let bind_addr = "127.0.0.1:8080".parse().unwrap();
+        let route = choose_ios_route(
+            Some(bind_addr),
+            Some("https://audio.example.test".to_string()),
+            Some(connection),
+        );
+
+        assert_eq!(route.bind_addr, bind_addr);
+        assert_eq!(
+            route.public_base_url.as_deref(),
+            Some("https://audio.example.test")
+        );
+        assert_eq!(route.kind, IosRouteKind::Explicit);
+    }
+
+    #[test]
+    fn identifies_known_ssh_clients_only_from_specific_terminal_hints() {
+        assert_eq!(
+            detect_ssh_client_name(Some("Blink"), None, Some("xterm-256color")).as_deref(),
+            Some("Blink")
+        );
+        assert_eq!(
+            detect_ssh_client_name(None, None, Some("xterm-kitty")).as_deref(),
+            Some("kitty")
+        );
+        assert_eq!(
+            detect_ssh_client_name(None, None, Some("xterm-256color")),
+            None
+        );
+        assert_eq!(
+            detect_ssh_client_name(Some("\u{1b}]0;spoofed"), None, None),
+            None
+        );
     }
 }

@@ -16,7 +16,8 @@ replacement.
 4. Choose the destination explicitly:
    - local machine: `--play`
    - desktop SSH: remote `--stdout`, piped into local `--play-stdin`
-   - iPhone/iPad SSH session: `--ios` with a configured local forward
+   - iPhone/iPad SSH session: `--ios`; private networks/tailnets route directly,
+     while public SSH sessions need a configured local forward
 5. Pass shell-sensitive text through stdin.
 6. If optional speech fails, report it briefly and continue.
 
@@ -36,14 +37,18 @@ printf '%s' 'The short update.' \
   | speak --play-stdin
 ```
 
-iOS SSH playback requires a client forward from local
-`127.0.0.1:17820` to remote `127.0.0.1:17820`:
+iOS SSH playback automatically uses the private host address when both SSH
+endpoints are on a LAN, VPN, or tailnet:
 
 ```sh
 speak --ios --speed 1.1 <<'SPEAK_TEXT'
 The short conversational update goes here. Open the printed link to listen.
 SPEAK_TEXT
 ```
+
+When the printed URL uses `127.0.0.1:17820`, the SSH connection is public or
+proxied and requires a client forward from local `127.0.0.1:17820` to remote
+`127.0.0.1:17820`. A remote command cannot create that client-side forward.
 
 Over SSH, `--play` targets the remote host's speakers. It does not send audio to
 the SSH client's device.

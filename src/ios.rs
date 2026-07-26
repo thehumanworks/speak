@@ -102,6 +102,14 @@ impl IosPlaybackServer {
 
             match self.listener.accept() {
                 Ok((mut stream, _peer)) => {
+                    // Accepted sockets can inherit the listener's nonblocking
+                    // mode on some platforms (including macOS). Restore blocking
+                    // I/O so `write_all` waits instead of truncating larger WAVs
+                    // on `WouldBlock`; the timeouts below retain the bound.
+                    if let Err(err) = stream.set_nonblocking(false) {
+                        eprintln!("could not configure the iOS playback connection: {err}");
+                        continue;
+                    }
                     if let Err(err) = stream.set_read_timeout(Some(IO_TIMEOUT)) {
                         eprintln!("could not set iOS playback read timeout: {err}");
                         continue;
@@ -616,6 +624,30 @@ mod tests {
         assert!(full.ends_with(b"RIFF-test-wave"));
 
         handle.join().unwrap().unwrap();
+    }
+
+    #[test]
+    fn serves_large_audio_without_truncating_the_response() {
+        let server =
+            IosPlaybackServer::bind("127.0.0.1:0".parse().unwrap(), None, Duration::from_secs(2))
+                .unwrap();
+        let addr = server.bind_addr();
+        let token = server.token.clone();
+        let wav = vec![0x5a; 8 * 1024 * 1024];
+        let expected_len = wav.len();
+        let handle = std::thread::spawn(move || server.serve(&wav));
+
+        let response = http_get(addr, &format!("/{token}/audio.wav"), None);
+        handle.join().unwrap().unwrap();
+
+        let body_offset = response
+            .windows(4)
+            .position(|window| window == b"\r\n\r\n")
+            .map(|offset| offset + 4)
+            .unwrap();
+        let body = &response[body_offset..];
+        assert_eq!(body.len(), expected_len);
+        assert!(body.iter().all(|byte| *byte == 0x5a));
     }
 
     #[test]

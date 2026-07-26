@@ -5,14 +5,15 @@ description: >-
   hear text, generate a WAV, narrate content, announce progress, or play remote
   synthesis on an iPhone/iPad SSH client. Covers explicit destination routing,
   including `--play`, `--out`, `--stdout`, desktop SSH playback through
-  `--play-stdin`, and the SSH tunnel/browser `--ios` path.
+  `--play-stdin`, and automatic private-network or tunneled browser playback
+  through `--ios`.
 ---
 
 # speak — on-device text-to-speech
 
 `speak` uses Supertonic-3 and ONNX Runtime locally. It can play through the
 machine running the command, write a WAV, stream WAV bytes, or hand audio to an
-iPhone/iPad browser through an SSH local forward.
+iPhone/iPad browser over a private SSH network or local forward.
 
 Prefer the installed binary when present. Otherwise use:
 
@@ -50,21 +51,28 @@ printf '%s' 'The remote task completed.' \
 
 ## iPhone/iPad over SSH
 
-Configure the SSH client once:
+Run remotely:
+
+```bash
+speak --ios "The remote task is complete."
+```
+
+When both ends of the SSH connection are on a private LAN, VPN, or tailnet,
+`--ios` detects the SSH addresses, binds the private host address on an
+available port, and prints a directly reachable one-time URL. No forwarding
+setup is needed.
+
+When the printed URL uses `127.0.0.1:17820`, the SSH connection is public or
+proxied. Configure the SSH client once:
 
 ```text
 local  127.0.0.1:17820
 remote 127.0.0.1:17820
 ```
 
-Then run remotely:
-
-```bash
-speak --ios "The remote task is complete."
-```
-
 Tap the one-time localhost URL printed in the terminal. Keep the SSH connection
 active while the browser loads the audio. Safari can require tapping Play.
+Standard SSH does not let a remote command add this client-side forward.
 
 When the forwarded local port is different:
 

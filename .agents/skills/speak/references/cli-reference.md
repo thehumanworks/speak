@@ -22,8 +22,8 @@ by `speak --stdout` and performs no synthesis.
 | `--stdout` | off | Stream WAV bytes to stdout, flushing each synthesized chunk. Combine with `--play` to also play locally. |
 | `--play` | off | Play through the default output device on the machine running `speak`. Over SSH, that is the remote host. |
 | `--play-stdin` | off | Incrementally validate and play the canonical mono PCM16 WAV received on stdin. Does not load the model. |
-| `--ios` | off | Serve a short-lived browser player for an iPhone/iPad SSH client. Conflicts with `--out`, `--stdout`, and `--play`. |
-| `--ios-bind <ADDR>` | `127.0.0.1:17820` | Remote listen address for `--ios`; requires `--ios`. |
+| `--ios` | off | Serve a short-lived browser player for an iPhone/iPad SSH client. Private SSH networks route directly; other sessions use the loopback tunnel. Conflicts with `--out`, `--stdout`, and `--play`. |
+| `--ios-bind <ADDR>` | automatic | Override the remote listen address selected by `--ios`; requires `--ios`. |
 | `--ios-url <ORIGIN>` | bind origin | Origin printed in the one-time URL. It must be `http://` or `https://` with no path, query, fragment, or whitespace. |
 | `--ios-timeout <SECONDS>` | `300` | Browser-link lifetime. Valid range: 1–86,400; requires `--ios`. |
 
@@ -58,10 +58,18 @@ streams samples to the local audio device. Use a non-PTY SSH execution channel.
 ## iPhone/iPad SSH playback
 
 SSH terminal channels cannot redirect the remote host's audio device into an iOS
-SSH application. `--ios` provides a client-independent hand-off over an SSH local
-forward.
+SSH application. Run `speak --ios "Hello on iOS."` first. When both addresses in
+`SSH_CONNECTION` are on a private LAN, VPN, tailnet (RFC 6598), or IPv6 ULA,
+`speak` binds the observed private SSH host address on an available port and
+prints a directly reachable one-time URL. No client setup is needed.
 
-Configure the iOS SSH client with:
+`speak` reports the SSH client IP address. It also reports the client application
+when the client provides a specific `TERM_PROGRAM`, `LC_TERMINAL`, or distinctive
+`TERM` value; standard SSH has no reliable client-application identity field.
+
+For public, NATed, or proxied SSH connections, automatic public HTTP exposure
+would leak audio in plaintext. `--ios` therefore stays on loopback and prints a
+`127.0.0.1:17820` URL. Configure the iOS SSH client with:
 
 ```text
 local  127.0.0.1:17820
@@ -74,15 +82,9 @@ OpenSSH equivalent:
 ssh -L 17820:127.0.0.1:17820 user@host
 ```
 
-Then run in the remote shell:
-
-```bash
-speak --ios "Hello on iOS."
-```
-
 Tap the printed `http://127.0.0.1:17820/<random-token>` URL. The endpoint:
 
-- binds to loopback by default;
+- binds to loopback in tunnel mode;
 - uses a random 128-bit bearer path;
 - serves a complete WAV with `HEAD` and single-byte-range support;
 - sets no-store and browser hardening headers;
@@ -91,6 +93,8 @@ Tap the printed `http://127.0.0.1:17820/<random-token>` URL. The endpoint:
 
 Safari can reject audible autoplay; the page always exposes native playback
 controls. Keep the SSH tunnel active while the browser fetches audio.
+The remote `speak` process cannot create this forward itself: local forwarding
+is owned by the SSH client/transport, not the remote shell channel.
 
 When the iOS local port differs from the remote port:
 
@@ -99,9 +103,9 @@ When the iOS local port differs from the remote port:
 speak --ios --ios-url http://127.0.0.1:8080 "Hello."
 ```
 
-If an external browser causes the SSH app to suspend its tunnel, use the SSH
-client's in-app browser/split view, or expose the endpoint only on a trusted
-private network/tailnet:
+Automatic private-network routing avoids tunnel suspension when the SSH
+addresses are directly reachable. If detection is unavailable, the same route
+can be selected explicitly:
 
 ```bash
 speak --ios \
