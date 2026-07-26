@@ -18,7 +18,19 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
         with:
           components: rustfmt
-      - run: rustfmt --edition 2021 --check --config skip_children=true src/main.rs src/ios.rs src/wavinput.rs
+      - name: Format changed Rust files
+        run: rustfmt --edition 2021 --config skip_children=true src/main.rs src/ios.rs src/wavinput.rs
+      - name: Upload formatted sources
+        uses: actions/upload-artifact@v4
+        with:
+          name: formatted-rust
+          path: |
+            src/main.rs
+            src/ios.rs
+            src/wavinput.rs
+          if-no-files-found: error
+      - name: Verify formatting
+        run: git diff --exit-code -- src/main.rs src/ios.rs src/wavinput.rs
 
   test:
     name: Test ${{ matrix.os }}
@@ -39,4 +51,15 @@ jobs:
       - name: Install Linux audio dependencies
         if: runner.os == 'Linux'
         run: sudo apt-get update && sudo apt-get install -y libasound2-dev pkg-config
-      - run: cargo test --workspace --locked --no-default-features
+      - name: Run tests
+        shell: bash
+        run: |
+          set -o pipefail
+          cargo test --workspace --locked --no-default-features 2>&1 | tee test.log
+      - name: Upload failing test log
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: test-log-${{ matrix.os }}
+          path: test.log
+          if-no-files-found: warn
