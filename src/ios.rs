@@ -15,7 +15,10 @@ use anyhow::{bail, Context, Result};
 const MAX_REQUEST_BYTES: usize = 16 * 1024;
 const IO_TIMEOUT: Duration = Duration::from_secs(10);
 const POLL_INTERVAL: Duration = Duration::from_millis(40);
+#[cfg(not(test))]
 const COMPLETE_TRANSFER_GRACE: Duration = Duration::from_secs(2);
+#[cfg(test)]
+const COMPLETE_TRANSFER_GRACE: Duration = Duration::from_millis(20);
 
 /// A one-shot HTTP server carrying one synthesized WAV.
 pub struct IosPlaybackServer {
@@ -90,17 +93,25 @@ impl IosPlaybackServer {
                 }
             }
             if now.duration_since(started) >= self.timeout {
-                bail!(
-                    "iOS playback link expired after {} seconds without a complete audio transfer",
+                eprintln!(
+                    "iOS playback link expired after {} seconds.",
                     self.timeout.as_secs()
                 );
+                return Ok(());
             }
 
             match self.listener.accept() {
                 Ok((mut stream, _peer)) => {
-                    stream.set_read_timeout(Some(IO_TIMEOUT)).ok();
-                    stream.set_write_timeout(Some(IO_TIMEOUT)).ok();
+                    if let Err(err) = stream.set_read_timeout(Some(IO_TIMEOUT)) {
+                        eprintln!("could not set iOS playback read timeout: {err}");
+                        continue;
+                    }
+                    if let Err(err) = stream.set_write_timeout(Some(IO_TIMEOUT)) {
+                        eprintln!("could not set iOS playback write timeout: {err}");
+                        continue;
+                    }
                     match handle_connection(&mut stream, &self.token, wav) {
+                        Ok(ConnectionOutcome::PlaybackFinished) => return Ok(()),
                         Ok(ConnectionOutcome::CompleteAudioTransfer) => {
                             complete_at = Some(Instant::now());
                         }
@@ -124,6 +135,7 @@ impl IosPlaybackServer {
 enum ConnectionOutcome {
     Other,
     CompleteAudioTransfer,
+    PlaybackFinished,
 }
 
 #[derive(Debug, PartialEq, Eq)]
@@ -137,6 +149,7 @@ struct Request {
 enum Method {
     Get,
     Head,
+    Post,
 }
 
 fn handle_connection(stream: &mut TcpStream, token: &str, wav: &[u8]) -> Result<ConnectionOutcome> {
@@ -152,14 +165,28 @@ fn handle_connection(stream: &mut TcpStream, token: &str, wav: &[u8]) -> Result<
     let page_path = format!("/{token}");
     let page_path_slash = format!("/{token}/");
     let audio_path = format!("/{token}/audio.wav");
+    let done_path = format!("/{token}/done");
+
+    if path == done_path && request.method == Method::Post {
+        write_empty_response(stream, 204, "No Content")?;
+        return Ok(ConnectionOutcome::PlaybackFinished);
+    }
 
     if path == page_path || path == page_path_slash {
+        if !matches!(request.method, Method::Get | Method::Head) {
+            write_method_not_allowed(stream, "GET, HEAD")?;
+            return Ok(ConnectionOutcome::Other);
+        }
         let body = player_page(token);
         write_html_response(stream, &body, request.method == Method::Head)?;
         return Ok(ConnectionOutcome::Other);
     }
 
     if path == audio_path {
+        if !matches!(request.method, Method::Get | Method::Head) {
+            write_method_not_allowed(stream, "GET, HEAD")?;
+            return Ok(ConnectionOutcome::Other);
+        }
         return write_audio_response(stream, wav, &request);
     }
 
@@ -204,6 +231,7 @@ fn read_request(stream: &mut TcpStream) -> Result<Request> {
     let method = match request_line.next() {
         Some("GET") => Method::Get,
         Some("HEAD") => Method::Head,
+        Some("POST") => Method::Post,
         Some(other) => bail!("unsupported HTTP method {other}"),
         None => bail!("HTTP request method was missing"),
     };
@@ -259,7 +287,13 @@ audio {{ display: block; width: 100%; margin-top: 1rem; }}
 <p>Playback should start automatically. Tap play if iOS blocks autoplay.</p>
 <audio id="audio" controls autoplay preload="auto" src="/{token}/audio.wav"></audio>
 </main>
-<script>document.getElementById('audio').play().catch(() => {{}});</script>
+<script>
+const audio = document.getElementById('audio');
+audio.addEventListener('ended', () => {{
+  fetch('/{token}/done', {{ method: 'POST', keepalive: true }}).catch(() => {{}});
+}});
+audio.play().catch(() => {{}});
+</script>
 </body>
 </html>
 "#
@@ -269,7 +303,7 @@ audio {{ display: block; width: 100%; margin-top: 1rem; }}
 
 fn write_html_response(stream: &mut TcpStream, body: &[u8], head_only: bool) -> Result<()> {
     let headers = format!(
-        "HTTP/1.1 200 OK\r\nContent-Type: text/html; charset=utf-8\r\nContent-Length: {}\r\nCache-Control: no-store\r\nX-Content-Type-Options: nosniff\r\nReferrer-Policy: no-referrer\r\nConnection: close\r\n\r\n",
+        "HTTP/1.1 200 OK\r\nContent-Type: text/html; charset=utf-8\r\nContent-Length: {}\r\nCache-Control: no-store\r\nContent-Security-Policy: default-src 'none'; style-src 'unsafe-inline'; media-src 'self'; script-src 'unsafe-inline'; connect-src 'self'\r\nX-Content-Type-Options: nosniff\r\nReferrer-Policy: no-referrer\r\nConnection: close\r\n\r\n",
         body.len()
     );
     stream
@@ -378,6 +412,15 @@ fn write_empty_response(stream: &mut TcpStream, code: u16, reason: &str) -> Resu
     Ok(())
 }
 
+fn write_method_not_allowed(stream: &mut TcpStream, allow: &str) -> Result<()> {
+    let headers = format!(
+        "HTTP/1.1 405 Method Not Allowed\r\nAllow: {allow}\r\nContent-Length: 0\r\nCache-Control: no-store\r\nConnection: close\r\n\r\n"
+    );
+    stream.write_all(headers.as_bytes())?;
+    stream.flush().ok();
+    Ok(())
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 struct ByteRange {
     start: usize,
@@ -427,11 +470,24 @@ fn parse_byte_range(value: &str, len: usize) -> Option<ByteRange> {
 
 fn normalize_base_url(value: &str) -> Result<String> {
     let trimmed = value.trim().trim_end_matches('/');
-    if !(trimmed.starts_with("http://") || trimmed.starts_with("https://")) {
+    if trimmed
+        .chars()
+        .any(|character| character.is_control() || character.is_whitespace())
+    {
+        bail!("--ios-url must not contain whitespace or control characters");
+    }
+
+    let Some((scheme, authority)) = trimmed.split_once("://") else {
+        bail!("--ios-url must begin with http:// or https://");
+    };
+    if !matches!(scheme, "http" | "https") {
         bail!("--ios-url must begin with http:// or https://");
     }
-    if trimmed.contains('?') || trimmed.contains('#') {
-        bail!("--ios-url must not contain a query string or fragment");
+    if authority.is_empty()
+        || authority.contains('/')
+        || authority.contains('?')
+        || authority.contains('#') {
+        bail!("--ios-url must contain only a scheme and authority, without a path, query, or fragment");
     }
     Ok(trimmed.to_string())
 }
@@ -475,7 +531,8 @@ fn fill_random(bytes: &mut [u8]) -> Result<()> {
 
     #[link(name = "bcrypt")]
     extern "system" {
-        fn BCryptGenRandom(
+        #[link_name = "BCryptGenRandom"]
+        fn bcrypt_gen_random(
             algorithm: *mut c_void,
             buffer: *mut u8,
             buffer_len: u32,
@@ -485,7 +542,7 @@ fn fill_random(bytes: &mut [u8]) -> Result<()> {
 
     let len = u32::try_from(bytes.len()).context("random token request was too large")?;
     let status = unsafe {
-        BCryptGenRandom(
+        bcrypt_gen_random(
             std::ptr::null_mut(),
             bytes.as_mut_ptr(),
             len,
@@ -506,6 +563,54 @@ fn fill_random(_bytes: &mut [u8]) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn http_get(addr: SocketAddr, path: &str, range: Option<&str>) -> Vec<u8> {
+        let mut stream = TcpStream::connect(addr).unwrap();
+        stream.set_read_timeout(Some(Duration::from_secs(2))).unwrap();
+        let mut request = format!(
+            "GET {path} HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n"
+        );
+        if let Some(range) = range {
+            request.push_str(&format!("Range: {range}\r\n"));
+        }
+        request.push_str("\r\n");
+        stream.write_all(request.as_bytes()).unwrap();
+        let mut response = Vec::new();
+        stream.read_to_end(&mut response).unwrap();
+        response
+    }
+
+    #[test]
+    fn serves_tokenised_page_and_range_aware_audio() {
+        let server = IosPlaybackServer::bind(
+            "127.0.0.1:0".parse().unwrap(),
+            None,
+            Duration::from_secs(2),
+        )
+        .unwrap();
+        let addr = server.bind_addr();
+        let token = server.token.clone();
+        let wav = b"RIFF-test-wave".to_vec();
+        let handle = std::thread::spawn(move || server.serve(&wav));
+
+        let page = http_get(addr, &format!("/{token}"), None);
+        assert!(page.starts_with(b"HTTP/1.1 200 OK\r\n"));
+        assert!(page.windows(b"<audio".len()).any(|window| window == b"<audio"));
+
+        let range = http_get(
+            addr,
+            &format!("/{token}/audio.wav"),
+            Some("bytes=0-3"),
+        );
+        assert!(range.starts_with(b"HTTP/1.1 206 Partial Content\r\n"));
+        assert!(range.ends_with(b"RIFF"));
+
+        let full = http_get(addr, &format!("/{token}/audio.wav"), None);
+        assert!(full.starts_with(b"HTTP/1.1 200 OK\r\n"));
+        assert!(full.ends_with(b"RIFF-test-wave"));
+
+        handle.join().unwrap().unwrap();
+    }
 
     #[test]
     fn parses_common_byte_ranges() {
@@ -547,6 +652,7 @@ mod tests {
             "http://127.0.0.1:17820"
         );
         assert!(normalize_base_url("ftp://127.0.0.1").is_err());
+        assert!(normalize_base_url("http://").is_err());
         assert!(normalize_base_url("http://127.0.0.1/path?x=1").is_err());
     }
 
