@@ -7,30 +7,33 @@ on:
       - main
 
 permissions:
-  contents: read
+  contents: write
 
 jobs:
   format:
+    if: github.event_name == 'pull_request'
     name: Rust formatting
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.head_ref }}
       - uses: dtolnay/rust-toolchain@stable
         with:
           components: rustfmt
       - name: Format changed Rust files
         run: rustfmt --edition 2021 --config skip_children=true src/main.rs src/ios.rs src/wavinput.rs
-      - name: Upload formatted sources
-        uses: actions/upload-artifact@v4
-        with:
-          name: formatted-rust
-          path: |
-            src/main.rs
-            src/ios.rs
-            src/wavinput.rs
-          if-no-files-found: error
-      - name: Verify formatting
-        run: git diff --exit-code -- src/main.rs src/ios.rs src/wavinput.rs
+      - name: Commit formatter output
+        shell: bash
+        run: |
+          if git diff --quiet -- src/main.rs src/ios.rs src/wavinput.rs; then
+            exit 0
+          fi
+          git config user.name github-actions[bot]
+          git config user.email 41898282+github-actions[bot]@users.noreply.github.com
+          git add src/main.rs src/ios.rs src/wavinput.rs
+          git commit -m "format rust sources"
+          git push origin "HEAD:${{ github.head_ref }}"
 
   test:
     name: Test ${{ matrix.os }}
