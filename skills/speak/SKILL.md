@@ -1,6 +1,6 @@
 ---
 name: speak
-description: Use the local `speak` text-to-speech CLI for brief, conversational audible progress updates and a spoken final summary while preserving important details in the written chat. Use when the user invokes `$speak`, asks to hear responses aloud, requests voice feedback while Codex works, or wants a hands-free conversational task experience.
+description: Use the local `speak` text-to-speech CLI for concise audible progress updates and final summaries, including desktop SSH playback and iPhone/iPad browser hand-off.
 ---
 
 # Speak
@@ -10,23 +10,17 @@ replacement.
 
 ## Workflow
 
-1. Verify the command with `command -v speak`. Read `speak --help` only when its
-   behavior is uncertain.
-2. Speak only useful milestones: the start of substantial work, a meaningful
-   result or change of direction, a blocker that needs attention, and the final
-   outcome. Do not narrate every tool call.
-3. Write the normal commentary update first, then play a shorter conversational
-   version aloud.
-4. Invoke `speak` with `--play` because captured command output may otherwise
-   become WAV bytes instead of audible playback. Prefer a natural speed around
-   `1.1`.
-5. Before sending the final written answer, play its concise conversational
-   summary aloud. Keep the complete evidence and reference material in the
-   written answer.
-6. If speech fails, report that briefly in writing and continue the task. Do not
-   let optional audio block delivery of the written result.
+1. Verify `speak` with `command -v speak` when necessary.
+2. Speak only meaningful milestones and a concise final outcome.
+3. Write the normal update first, then invoke speech.
+4. Choose the destination explicitly:
+   - local machine: `--play`
+   - desktop SSH: remote `--stdout`, piped into local `--play-stdin`
+   - iPhone/iPad SSH session: `--ios` with a configured local forward
+5. Pass shell-sensitive text through stdin.
+6. If optional speech fails, report it briefly and continue.
 
-Use standard input when the text contains shell-sensitive characters:
+Local playback:
 
 ```sh
 speak --play --speed 1.1 <<'SPEAK_TEXT'
@@ -34,27 +28,32 @@ The short conversational update goes here.
 SPEAK_TEXT
 ```
 
-Never interpolate untrusted text into a shell command.
+Desktop SSH playback uses a binary-transparent non-PTY channel:
 
-## Spoken Style
+```sh
+printf '%s' 'The short update.' \
+  | ssh -T user@host 'speak --stdout' \
+  | speak --play-stdin
+```
 
-- Use relaxed, direct prose with contractions where natural.
+iOS SSH playback requires a client forward from local
+`127.0.0.1:17820` to remote `127.0.0.1:17820`:
+
+```sh
+speak --ios --speed 1.1 <<'SPEAK_TEXT'
+The short conversational update goes here. Open the printed link to listen.
+SPEAK_TEXT
+```
+
+Over SSH, `--play` targets the remote host's speakers. It does not send audio to
+the SSH client's device.
+
+Never interpolate untrusted text into a shell command. Never speak secrets,
+credentials, personal data, raw logs, code, URLs, or dense lists.
+
+## Spoken style
+
 - Keep progress updates to one or two sentences.
-- Keep the final spoken summary to two to four sentences unless the user asks
-  for more detail.
-- Lead with the outcome, then mention the most important next step, limitation,
-  or decision.
-- Translate technical detail into plain language. Leave commands, code, long
-  paths, URLs, citations, raw logs, and dense lists in writing.
-- Never speak secrets, credentials, personal data, or other sensitive content.
-- When a user decision is required, speak the short question and also write the
-  exact question in chat.
-
-## Written Record
-
-- Continue to provide normal written progress updates and a self-contained final
-  answer.
-- Record exact changes, files, validation results, limitations, and reusable
-  instructions in writing when relevant.
-- Keep spoken and written claims consistent. Treat the spoken response as a
-  summary, not as evidence that work succeeded.
+- Keep final summaries to two to four sentences.
+- Lead with the outcome, then the most important limitation or next step.
+- Preserve exact technical evidence in writing rather than speech.
