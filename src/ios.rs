@@ -193,7 +193,13 @@ fn handle_connection(stream: &mut TcpStream, token: &str, wav: &[u8]) -> Result<
     if path == "/favicon.ico" {
         write_empty_response(stream, 204, "No Content")?;
     } else {
-        write_text_response(stream, 404, "Not Found", "not found\n", request.method == Method::Head)?;
+        write_text_response(
+            stream,
+            404,
+            "Not Found",
+            "not found\n",
+            request.method == Method::Head,
+        )?;
     }
     Ok(ConnectionOutcome::Other)
 }
@@ -203,7 +209,9 @@ fn read_request(stream: &mut TcpStream) -> Result<Request> {
     let mut chunk = [0u8; 1024];
 
     loop {
-        let read = stream.read(&mut chunk).context("failed to read HTTP request")?;
+        let read = stream
+            .read(&mut chunk)
+            .context("failed to read HTTP request")?;
         if read == 0 {
             break;
         }
@@ -239,9 +247,7 @@ fn read_request(stream: &mut TcpStream) -> Result<Request> {
         .next()
         .context("HTTP request path was missing")?
         .to_string();
-    let version = request_line
-        .next()
-        .context("HTTP version was missing")?;
+    let version = request_line.next().context("HTTP version was missing")?;
     if !version.starts_with("HTTP/1.") {
         bail!("unsupported HTTP version {version}");
     }
@@ -486,7 +492,8 @@ fn normalize_base_url(value: &str) -> Result<String> {
     if authority.is_empty()
         || authority.contains('/')
         || authority.contains('?')
-        || authority.contains('#') {
+        || authority.contains('#')
+    {
         bail!("--ios-url must contain only a scheme and authority, without a path, query, or fragment");
     }
     Ok(trimmed.to_string())
@@ -550,7 +557,10 @@ fn fill_random(bytes: &mut [u8]) -> Result<()> {
         )
     };
     if status < 0 {
-        bail!("Windows CSPRNG failed with NTSTATUS 0x{:08x}", status as u32);
+        bail!(
+            "Windows CSPRNG failed with NTSTATUS 0x{:08x}",
+            status as u32
+        );
     }
     Ok(())
 }
@@ -566,10 +576,11 @@ mod tests {
 
     fn http_get(addr: SocketAddr, path: &str, range: Option<&str>) -> Vec<u8> {
         let mut stream = TcpStream::connect(addr).unwrap();
-        stream.set_read_timeout(Some(Duration::from_secs(2))).unwrap();
-        let mut request = format!(
-            "GET {path} HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n"
-        );
+        stream
+            .set_read_timeout(Some(Duration::from_secs(2)))
+            .unwrap();
+        let mut request =
+            format!("GET {path} HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n");
         if let Some(range) = range {
             request.push_str(&format!("Range: {range}\r\n"));
         }
@@ -582,12 +593,9 @@ mod tests {
 
     #[test]
     fn serves_tokenised_page_and_range_aware_audio() {
-        let server = IosPlaybackServer::bind(
-            "127.0.0.1:0".parse().unwrap(),
-            None,
-            Duration::from_secs(2),
-        )
-        .unwrap();
+        let server =
+            IosPlaybackServer::bind("127.0.0.1:0".parse().unwrap(), None, Duration::from_secs(2))
+                .unwrap();
         let addr = server.bind_addr();
         let token = server.token.clone();
         let wav = b"RIFF-test-wave".to_vec();
@@ -595,13 +603,11 @@ mod tests {
 
         let page = http_get(addr, &format!("/{token}"), None);
         assert!(page.starts_with(b"HTTP/1.1 200 OK\r\n"));
-        assert!(page.windows(b"<audio".len()).any(|window| window == b"<audio"));
+        assert!(page
+            .windows(b"<audio".len())
+            .any(|window| window == b"<audio"));
 
-        let range = http_get(
-            addr,
-            &format!("/{token}/audio.wav"),
-            Some("bytes=0-3"),
-        );
+        let range = http_get(addr, &format!("/{token}/audio.wav"), Some("bytes=0-3"));
         assert!(range.starts_with(b"HTTP/1.1 206 Partial Content\r\n"));
         assert!(range.ends_with(b"RIFF"));
 
