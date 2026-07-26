@@ -3,8 +3,9 @@
 //! Thin wrapper over the `speak-core` SDK: parse arguments, read text from an
 //! argument or stdin, then synthesize. Long inputs are split into coherent
 //! chunks and synthesized one at a time, so playback and stdout streaming start
-//! on the first chunk instead of waiting for the whole document. All status
-//! text goes to stderr so stdout can carry raw audio.
+//! on the first chunk instead of waiting for the whole document. Standard output
+//! carries the selected protocol payload: WAV bytes for `--stdout`, or the one-time
+//! playback URL for `--ios`; status and diagnostics go to standard error.
 
 use std::io::{IsTerminal, Read, Write};
 use std::net::SocketAddr;
@@ -276,9 +277,7 @@ fn main() -> Result<()> {
         };
         let timeout_secs = args.ios_timeout.unwrap_or(DEFAULT_IOS_TIMEOUT_SECS);
         if timeout_secs == 0 || timeout_secs > MAX_IOS_TIMEOUT_SECS {
-            bail!(
-                "--ios-timeout must be between 1 and {MAX_IOS_TIMEOUT_SECS} seconds"
-            );
+            bail!("--ios-timeout must be between 1 and {MAX_IOS_TIMEOUT_SECS} seconds");
         }
         Some(IosPlaybackServer::bind(
             bind_addr,
