@@ -45,6 +45,39 @@ jobs:
           pkg-config --exists alsa openssl
           npm pack --dry-run
 
+  distro-packages:
+    name: Packages (${{ matrix.image }})
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        image: ['debian:13-slim', 'fedora:44', 'archlinux:base']
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install dependencies in an isolated distribution
+        env:
+          DISTRO_IMAGE: ${{ matrix.image }}
+        run: |
+          docker run --rm --mount "type=bind,src=$PWD,dst=/src,readonly" "$DISTRO_IMAGE" sh -eu -c '
+            if command -v apt-get >/dev/null; then
+              apt-get update
+              apt-get install -y --no-install-recommends nodejs
+            elif command -v dnf >/dev/null; then
+              dnf install -y nodejs
+            else
+              pacman -Syu --noconfirm nodejs
+            fi
+            printf "%s\n" "# Preserve this configuration" > /root/.asoundrc
+            node /src/scripts/setup.js --deps-only --yes
+            # Simulate WSLg discovery to exercise plugin selection, not playback.
+            mkdir -p /mnt/wslg
+            WSL_DISTRO_NAME=smoke PULSE_SERVER=unix:/mnt/wslg/PulseServer \
+              node /src/scripts/setup.js --deps-only --yes
+            pkg-config --exists alsa openssl
+            find /usr -name libasound_module_pcm_pulse.so -print -quit | grep .
+            grep -Fx "# Preserve this configuration" /root/.asoundrc
+          '
+
   format:
     name: Rust formatting
     runs-on: ubuntu-latest

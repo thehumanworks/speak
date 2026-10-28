@@ -21,6 +21,16 @@
             rocmSupport = false;
             coremlSupport = false;
           };
+          # ALSA_PLUGIN_DIR is one directory, not a colon-separated search path.
+          # Include both backends so existing PulseAudio/WSLg and PipeWire
+          # defaults resolve their plugins without changing device routing.
+          alsaPlugins = pkgs.symlinkJoin {
+            name = "speak-alsa-plugins";
+            paths = [
+              "${pkgs.alsa-plugins}/lib/alsa-lib"
+              "${lib.getLib pkgs.pipewire}/lib/alsa-lib"
+            ];
+          };
           speak = assert runtime.version == "1.24.4";
             pkgs.rustPlatform.buildRustPackage {
               pname = "speak";
@@ -47,7 +57,7 @@
               # default device, overwrite user settings or start an audio daemon.
               postInstall = ''
                 wrapProgram "$out/bin/speak" \
-                  --set-default ALSA_PLUGIN_DIR "${pkgs.alsa-plugins}/lib/alsa-lib" \
+                  --set-default ALSA_PLUGIN_DIR "${alsaPlugins}" \
                   --set-default SSL_CERT_FILE "${pkgs.cacert}/etc/ssl/certs/ca-bundle.crt"
               '';
 
@@ -55,6 +65,8 @@
               nativeInstallCheckInputs = [ pkgs.patchelf ];
               installCheckPhase = ''
                 runHook preInstallCheck
+                test -e "${alsaPlugins}/libasound_module_pcm_pulse.so"
+                test -e "${alsaPlugins}/libasound_module_pcm_pipewire.so"
                 # Prove ORT is dynamically linked and retained in the closure.
                 patchelf --print-needed "$out/bin/.speak-wrapped" | grep -F libonnxruntime.so
                 patchelf --print-rpath "$out/bin/.speak-wrapped" | grep -F '${lib.getLib runtime}/lib'

@@ -508,8 +508,10 @@ npm run test:setup
 npm run test:npm-package
 ```
 
-CI also exercises the actual dependency installer on Ubuntu. This does not
-establish Fedora/Arch/WSL/Windows runtime playback support. The installer is
+CI also exercises actual dependency installation on Ubuntu and in isolated
+Debian, Fedora and Arch containers. Container WSLg detection is simulated to
+check plugin installation, not playback. This does not establish audible
+Linux/WSL/Windows playback support. The installer is
 JavaScript and executes argument arrays without a shell; ShellCheck does not
 apply to it.
 
