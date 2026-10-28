@@ -15,19 +15,26 @@ const requestedVersion =
   process.env.SPEAK_VERSION ||
   `v${packageJson.version}`;
 const vendorDir = path.join(packageRoot, "vendor");
-const token =
-  process.env.SPEAK_GITHUB_TOKEN || process.env.GITHUB_TOKEN || ghToken();
+let token;
 
-main().catch((error) => {
-  console.error(`speak npm install: ERROR: ${error.message}`);
-  process.exit(1);
-});
+if (require.main === module) {
+  main().catch((error) => {
+    console.error(`speak npm install: ERROR: ${error.message}`);
+    process.exitCode = 1;
+  });
+}
 
 async function main() {
   if (process.env.SPEAK_NPM_SKIP_DOWNLOAD === "1") {
     log("skipping binary install because SPEAK_NPM_SKIP_DOWNLOAD=1");
     return;
   }
+
+  if (process.platform === "linux") {
+    log("System dependencies are not installed by npm's lifecycle. Run speak-setup (or npm run setup from a checkout) to install them explicitly; see README.");
+  }
+
+  token = process.env.SPEAK_GITHUB_TOKEN || process.env.GITHUB_TOKEN || ghToken();
 
   const target = detectTarget(process.platform, process.arch);
   log(`target ${target}`);
@@ -181,13 +188,7 @@ function requestBuffer(url, headers, redirectCount = 0) {
     return Promise.reject(new Error(`too many redirects while fetching ${url}`));
   }
   return new Promise((resolve, reject) => {
-    const requestHeaders = {
-      "User-Agent": "@nothumanwork/speak npm installer",
-      ...headers,
-    };
-    if (token) {
-      requestHeaders.Authorization = `Bearer ${token}`;
-    }
+    const requestHeaders = downloadHeaders(url, headers, token);
     const request = https.get(url, { headers: requestHeaders }, (response) => {
       const location = response.headers.location;
       if (location && response.statusCode >= 300 && response.statusCode < 400) {
@@ -284,14 +285,23 @@ function ghToken() {
   return "";
 }
 
-function commandExists(command) {
-  const lookup =
-    process.platform === "win32"
-      ? spawnSync("where", [command], { stdio: "ignore" })
-      : spawnSync("command", ["-v", command], { stdio: "ignore" });
+function commandExists(command, spawn = spawnSync) {
+  // `command` is a shell builtin, not a portable executable. Only used for cargo.
+  const lookup = spawn(command, ["--version"], { stdio: "ignore", shell: false });
   return lookup.status === 0;
+}
+
+function downloadHeaders(url, headers, authToken) {
+  const result = { "User-Agent": "@nothumanwork/speak npm installer", ...headers };
+  // Release assets redirect to storage hosts. Never forward GitHub credentials there.
+  if (authToken && new URL(url).origin === "https://api.github.com") {
+    result.Authorization = `Bearer ${authToken}`;
+  }
+  return result;
 }
 
 function log(message) {
   console.error(`speak npm install: ${message}`);
 }
+
+module.exports = { commandExists, downloadHeaders };

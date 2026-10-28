@@ -10,6 +10,74 @@ permissions:
   contents: read
 
 jobs:
+  nix:
+    name: Nix package (x86_64 Linux)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: cachix/install-nix-action@v31
+      - name: Evaluate and build package checks in the sandbox
+        run: nix flake check --print-build-logs
+      - name: Verify app and separate runtime dependency
+        run: |
+          nix build .#speak --print-build-logs
+          nix run . -- --list-voices
+          nix path-info --recursive .#speak | grep onnxruntime-1.24.4
+
+  setup:
+    name: Dependency installer
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+      - run: npm run test:setup
+      - run: npm run test:npm-package
+      - name: Preview system dependency installation
+        run: node scripts/setup.js --deps-only --dry-run
+      - name: Install actual system dependencies twice
+        run: |
+          node scripts/setup.js --deps-only --yes
+          node scripts/setup.js --deps-only --yes
+      - name: Check installed development libraries and npm contents
+        run: |
+          pkg-config --exists alsa openssl
+          npm pack --dry-run
+
+  distro-packages:
+    name: Packages (${{ matrix.image }})
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        image: ['debian:13-slim', 'fedora:44', 'archlinux:base']
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install dependencies in an isolated distribution
+        env:
+          DISTRO_IMAGE: ${{ matrix.image }}
+        run: |
+          docker run --rm --mount "type=bind,src=$PWD,dst=/src,readonly" "$DISTRO_IMAGE" sh -eu -c '
+            if command -v apt-get >/dev/null; then
+              apt-get update
+              apt-get install -y --no-install-recommends nodejs
+            elif command -v dnf >/dev/null; then
+              dnf install -y nodejs
+            else
+              pacman -Syu --noconfirm nodejs
+            fi
+            printf "%s\n" "# Preserve this configuration" > /root/.asoundrc
+            node /src/scripts/setup.js --deps-only --yes
+            # Simulate WSLg discovery to exercise plugin selection, not playback.
+            mkdir -p /mnt/wslg
+            WSL_DISTRO_NAME=smoke PULSE_SERVER=unix:/mnt/wslg/PulseServer \
+              node /src/scripts/setup.js --deps-only --yes
+            pkg-config --exists alsa openssl
+            find /usr -name libasound_module_pcm_pulse.so -print -quit | grep .
+            grep -Fx "# Preserve this configuration" /root/.asoundrc
+          '
+
   format:
     name: Rust formatting
     runs-on: ubuntu-latest
