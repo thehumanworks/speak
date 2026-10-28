@@ -15,12 +15,9 @@
         let
           pkgs = import nixpkgs { inherit system; };
           lib = pkgs.lib;
-          runtime = pkgs.onnxruntime.override {
-            pythonSupport = false;
-            cudaSupport = false;
-            rocmSupport = false;
-            coremlSupport = false;
-          };
+          # Reuse nixpkgs' canonical CPU package to retain binary-cache hits.
+          # Its Python wheel is a separate `dist` output; speak links only `out`.
+          runtime = pkgs.onnxruntime;
           # ALSA_PLUGIN_DIR is one directory, not a colon-separated search path.
           # Include both backends so existing PulseAudio/WSLg and PipeWire
           # defaults resolve their plugins without changing device routing.
