@@ -6,10 +6,13 @@
   "author": "Tomas Roda <rodat.dev@proton.me>",
   "private": false,
   "bin": {
-    "speak": "bin/speak.js"
+    "speak": "bin/speak.js",
+    "speak-setup": "scripts/setup.js"
   },
   "scripts": {
     "postinstall": "node scripts/npm-install.js",
+    "setup": "node scripts/setup.js",
+    "test:setup": "node --test scripts/setup.test.js",
     "test:npm-package": "node --check scripts/npm-install.js && node --check bin/speak.js && SPEAK_NPM_SKIP_DOWNLOAD=1 node scripts/npm-install.js",
     "smoke:local": "node scripts/smoke-npm-local.mjs",
     "smoke:github:bunx": "bunx github:thehumanworks/speak --list-voices",
@@ -18,6 +21,7 @@
   "files": [
     "bin/speak.js",
     "scripts/npm-install.js",
+    "scripts/setup.js",
     "scripts/smoke-npm-local.mjs",
     "README.md",
     "Cargo.toml",

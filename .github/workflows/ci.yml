@@ -10,6 +10,41 @@ permissions:
   contents: read
 
 jobs:
+  nix:
+    name: Nix package (x86_64 Linux)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: cachix/install-nix-action@v31
+      - name: Evaluate and build package checks in the sandbox
+        run: nix flake check --print-build-logs
+      - name: Verify app and separate runtime dependency
+        run: |
+          nix build .#speak --print-build-logs
+          nix run . -- --list-voices
+          nix path-info --recursive .#speak | grep onnxruntime-1.24.4
+
+  setup:
+    name: Dependency installer
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+      - run: npm run test:setup
+      - run: npm run test:npm-package
+      - name: Preview system dependency installation
+        run: node scripts/setup.js --deps-only --dry-run
+      - name: Install actual system dependencies twice
+        run: |
+          node scripts/setup.js --deps-only --yes
+          node scripts/setup.js --deps-only --yes
+      - name: Check installed development libraries and npm contents
+        run: |
+          pkg-config --exists alsa openssl
+          npm pack --dry-run
+
   format:
     name: Rust formatting
     runs-on: ubuntu-latest

@@ -31,6 +31,128 @@ SDK rather than reaching into the model plumbing.
 
 ## Install
 
+### Nix package (Linux)
+
+With Nix's `nix-command` and `flakes` features enabled, from this checkout:
+
+```bash
+nix run . -- --list-voices
+nix run . -- --play "Hello."
+nix profile install .#speak
+```
+
+The flake provides `packages.<system>.speak` and the default app for
+`x86_64-linux` and `aarch64-linux`. ONNX Runtime **1.24.4** is a separate,
+automatically installed dependency, pinned by the immutable nixpkgs revision in
+`flake.nix`. It is dynamically linked, not embedded in the executable. The
+`ort-sys` build is explicitly prevented from downloading another runtime, and
+Cargo builds offline from `Cargo.lock` sources. Nix fetches declared build inputs
+before entering the build sandbox. Model weights are separate: first use still
+downloads them to the normal per-user cache, or use `--no-download` and an
+already populated `--model-dir`.
+
+For NixOS or Home Manager, add this package as a flake input (use the checkout's
+absolute path until your chosen revision is published):
+
+```nix
+inputs.speak.url = "path:/absolute/path/to/speak";
+```
+
+Pass `inputs` through your existing `specialArgs` (NixOS) or `extraSpecialArgs`
+(Home Manager). Then use either of these in the corresponding configuration:
+
+```nix
+{ inputs, pkgs, ... }: {
+  environment.systemPackages = [
+    inputs.speak.packages.${pkgs.stdenv.hostPlatform.system}.speak
+  ];
+}
+```
+
+```nix
+{ inputs, pkgs, ... }: {
+  home.packages = [
+    inputs.speak.packages.${pkgs.stdenv.hostPlatform.system}.speak
+  ];
+}
+```
+
+Once published, `github:thehumanworks/speak/<commit-or-branch>` can replace the
+path input and `.` in the commands. Keep speak's nixpkgs input pinned rather
+than making it follow your system's input: the runtime version must match the
+Rust binding. No NixOS/Home Manager module or new settings format is needed.
+
+On ordinary Linux and NixOS, the package uses your existing audio service and
+ALSA configuration. On WSL 2 with WSLg, keep `PULSE_SERVER` and use:
+
+```bash
+nix run . -- --play "Hello from WSL."
+```
+
+The package supplies ALSA plugins but does not select a default device or edit
+audio settings; see the WSL guidance below if ALSA has no default device.
+See the [Nix flake manual](https://nix.dev/manual/nix/2.28/command-ref/new-cli/nix3-flake.html)
+for enabling flakes and selecting package outputs.
+
+### Setup with system dependencies (Linux)
+
+From a checkout, with Node 18+ installed:
+
+```bash
+git clone https://github.com/thehumanworks/speak.git
+cd speak
+npm run setup -- --dry-run
+npm run setup
+node bin/speak.js --play "Hello."
+```
+
+Setup installs runtime and source-build system dependencies **by default**, then
+runs the existing binary downloader/source fallback. Install a current Rust
+toolchain separately if a source build is needed. It shows every command and
+asks before changing packages. Run as your normal user; only package commands
+use sudo. The binary is installed into this package's `vendor/` directory.
+
+```bash
+# Already have a binary: install runtime dependencies only
+node scripts/setup.js --deps-only --runtime-only
+# Prepare for Cargo (no binary download/build by setup)
+node scripts/setup.js --deps-only
+# Automation: no prompts, including sudo (requires root or configured sudo access)
+node scripts/setup.js --deps-only --yes
+```
+
+Without a terminal, setup requires `--yes`; it uses `sudo -n` and stops if sudo
+needs a password. `--dry-run` never executes commands or writes files. Root can
+use `--deps-only`, but downloads/builds must run as a normal user. Package
+operations can be repeated; a failed command stops setup immediately. Earlier
+successful package operations are not rolled back.
+
+The explicit matrix is Debian, Ubuntu, Fedora and Arch Linux (`ID` from
+`/etc/os-release`, not guessed from `ID_LIKE`). Other distributions, including
+Alpine, openSUSE and derivatives with different IDs, stop with manual dependency
+guidance. Nix users should use the package below instead. This is a package-name
+matrix, not a guarantee that every release can run the same prebuilt binary:
+older glibc systems may need a source build.
+
+| Distribution | Runtime packages (in addition to `ca-certificates`, `tar`) | Extra source-build packages |
+|---|---|---|
+| Debian / Ubuntu | `libasound2-plugins`, `libstdc++6` | `build-essential`, `pkg-config`, `libasound2-dev`, `libssl-dev` |
+| Fedora | `alsa-lib`, `libstdc++`; `alsa-plugins-pulseaudio` on WSLg | `gcc`, `gcc-c++`, `make`, `pkgconf-pkg-config`, `alsa-lib-devel`, `openssl-devel` |
+| Arch | `alsa-lib`, `alsa-plugins`, `libpulse`, `gcc-libs` | `base-devel`, `openssl` |
+
+Debian/Ubuntu's plugin package pulls in the correct ALSA runtime, including the
+`libasound2` / `libasound2t64` transition. Arch users must keep their system fully
+upgraded; setup deliberately does not perform a partial database refresh or a
+whole-system upgrade. Package names and plugin dependencies can be inspected in
+the [Debian](https://packages.debian.org/trixie/libasound2-plugins),
+[Ubuntu](https://packages.ubuntu.com/noble/libasound2-plugins),
+[Fedora](https://packages.fedoraproject.org/pkgs/alsa-plugins/alsa-plugins-pulseaudio/)
+and [Arch](https://archlinux.org/packages/extra/x86_64/alsa-plugins/) catalogs.
+
+macOS and Windows use their native audio stack; setup installs no system packages
+there. Source builds still require Rust plus Xcode Command Line Tools on macOS,
+or MSVC Build Tools on Windows.
+
 ### npm or Bun
 
 The npm package installs a matching prebuilt binary from GitHub Releases and
@@ -40,6 +162,18 @@ falls back to a source build when necessary:
 bunx @nothumanwork/speak --list-voices
 npx -y @nothumanwork/speak --list-voices
 ```
+
+The automatic npm lifecycle never installs system packages or invokes sudo.
+For dependency installation, use `npm run setup` above, or run `speak-setup`
+after a global package install. To invoke setup from the published package
+without running its lifecycle first:
+
+```bash
+npx --yes --ignore-scripts --package=@nothumanwork/speak speak-setup
+```
+
+`--yes` here accepts npx's package download; setup still shows and confirms its
+own plan. Pass a trailing `--yes` to accept setup's plan noninteractively.
 
 You can also install directly from this GitHub repository:
 
@@ -57,6 +191,7 @@ Useful installer overrides:
 ### Cargo
 
 ```bash
+node scripts/setup.js --deps-only  # Linux dependencies; Node 18+ required
 cargo install --path .
 ```
 
@@ -293,6 +428,43 @@ CoreML, making the failed attempt slower than selecting CPU directly.
 Local playback uses `cpal`: CoreAudio on macOS, ALSA on Linux, and WASAPI on
 Windows. Browser playback does not require an audio device on the remote host.
 
+### WSL 2 playback
+
+`--play` can use Windows speakers through WSL 2 + WSLg. WSLg supplies its own
+PulseAudio server and `PULSE_SERVER`; the ALSA PulseAudio plugin bridges CPAL to
+that server. See [Microsoft's WSLg architecture](https://github.com/microsoft/wslg#wslg-system-distro).
+Inside your WSL distribution, run setup above and then:
+
+```bash
+printf '%s\n' "$PULSE_SERVER"
+node bin/speak.js --play "Hello from WSL."
+```
+
+Setup never writes `.asoundrc`, `/etc/asound.conf`, or custom ALSA fragments,
+and never starts a PulseAudio daemon. Fedora's WSLg plugin package itself adds
+a default ALSA route, which setup reports before confirmation; review custom
+`conf.d` routing before accepting that package. Existing top-level user/system
+configuration is left intact.
+
+If ALSA still cannot find a default device, inspect your existing configuration
+and, only if appropriate, merge these entries into `~/.asoundrc`:
+
+```text
+pcm.!default { type pulse }
+ctl.!default { type pulse }
+```
+
+Do not replace an existing configuration blindly. Keep the WSLg-provided
+`PULSE_SERVER`; do not launch another daemon inside WSLg. WSL 1 or WSL without
+WSLg needs separate audio setup; writing a WAV with `--out` still works.
+
+### CLI configuration
+
+The CLI does not read a user settings/config file. Use CLI flags for voices,
+speed, output destination and other settings. `SUPERTONIC_CACHE_DIR` selects
+the model cache (or use `--model-dir`); there is no NixOS/Home Manager settings
+module to configure. The model's `tts.json` is model data, not CLI preferences.
+
 ## SDK
 
 ```rust
@@ -327,6 +499,32 @@ engine.speak_stream("F1", &SynthesisRequest::new(long_text), |chunk| {
 server should place each engine behind a mutex or maintain a small engine pool.
 
 ## Validation
+
+Installer tests use mocked process execution and real temporary files; they do
+not install host packages or validate actual audio playback:
+
+```bash
+npm run test:setup
+npm run test:npm-package
+```
+
+CI also exercises the actual dependency installer on Ubuntu. This does not
+establish Fedora/Arch/WSL/Windows runtime playback support. The installer is
+JavaScript and executes argument arrays without a shell; ShellCheck does not
+apply to it.
+
+The Nix package has build/install checks for dynamic ONNX linkage, its runtime
+store path, and device-free CLI commands:
+
+```bash
+nix flake check --print-build-logs
+nix build .#speak --print-build-logs
+nix path-info --recursive .#speak | grep onnxruntime-1.24.4
+```
+
+The Linux CI job runs these checks for x86_64. The aarch64 output is defined but
+must be built on an aarch64 runner or configured remote builder before claiming
+platform validation. None of these checks validate audible playback.
 
 Run the default and portable configurations:
 
